@@ -139,6 +139,7 @@ async def get_all_decks_with_cards(kind: str) -> list[asyncpg.Record]:
         "FROM decks d "
         "LEFT JOIN cards c ON c.deck_id = d.id "
         "WHERE d.kind = $1::deck_kind "
+        "  AND COALESCE(d.properties->>'status', 'published') = 'published' "
         "ORDER BY d.created_at DESC, c.position",
         kind,
     )
@@ -149,7 +150,9 @@ async def get_categories_with_counts() -> list[asyncpg.Record]:
     p = get_pool()
     return await p.fetch(
         "SELECT title, properties->>'pic' AS pic, card_count "
-        "FROM decks WHERE kind = 'trivia' ORDER BY title"
+        "FROM decks WHERE kind = 'trivia' "
+        "  AND COALESCE(properties->>'status', 'published') = 'published' "
+        "ORDER BY title"
     )
 
 
@@ -180,14 +183,15 @@ import uuid
 
 
 async def create_deck(title: str, kind: str, properties: dict) -> asyncpg.Record:
-    """Create a new deck and return it."""
+    """Create a new deck and return it. New decks default to draft status."""
     p = get_pool()
     deck_id = uuid.uuid4()
+    props = {**properties, "status": properties.get("status", "draft")}
     return await p.fetchrow(
         "INSERT INTO decks (id, title, kind, properties) "
         "VALUES ($1, $2, $3::deck_kind, $4) "
         "RETURNING id, title, kind, properties, card_count, created_at",
-        deck_id, title, kind, properties,
+        deck_id, title, kind, props,
     )
 
 

@@ -59,6 +59,38 @@ async def update_deck(deck_id: UUID, body: UpdateDeckIn) -> DeckSummaryOut:
     )
 
 
+@router.post("/decks/{deck_id}/publish")
+async def publish_deck(deck_id: UUID) -> DeckSummaryOut:
+    """Publish a deck so it appears in the catalog."""
+    deck_row, _ = await db.get_deck(str(deck_id))
+    if deck_row is None:
+        raise HTTPException(404, "Deck not found")
+    props = dict(deck_row["properties"] or {})
+    props["status"] = "published"
+    row = await db.update_deck(str(deck_id), None, props)
+    return DeckSummaryOut(
+        id=row["id"], title=row["title"], kind=row["kind"],
+        properties=row["properties"] or {}, card_count=row["card_count"],
+        created_at=row["created_at"],
+    )
+
+
+@router.post("/decks/{deck_id}/unpublish")
+async def unpublish_deck(deck_id: UUID) -> DeckSummaryOut:
+    """Revert a deck to draft status."""
+    deck_row, _ = await db.get_deck(str(deck_id))
+    if deck_row is None:
+        raise HTTPException(404, "Deck not found")
+    props = dict(deck_row["properties"] or {})
+    props["status"] = "draft"
+    row = await db.update_deck(str(deck_id), None, props)
+    return DeckSummaryOut(
+        id=row["id"], title=row["title"], kind=row["kind"],
+        properties=row["properties"] or {}, card_count=row["card_count"],
+        created_at=row["created_at"],
+    )
+
+
 @router.delete("/decks/{deck_id}")
 async def delete_deck(deck_id: UUID) -> dict:
     """Delete a deck and all its cards."""
