@@ -119,3 +119,49 @@ class SourceRunOut(BaseModel):
     items_added: int
     items_skipped: int
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Studio CRUD (write endpoints)
+# ---------------------------------------------------------------------------
+
+class CreateDeckIn(BaseModel):
+    title: str
+    kind: str  # flashcard, trivia, newsquiz
+    properties: dict = {}
+
+
+class UpdateDeckIn(BaseModel):
+    title: str | None = None
+    properties: dict | None = None
+
+
+class CreateCardIn(BaseModel):
+    question: str
+    properties: dict = {}
+    difficulty: str = "medium"  # easy, medium, hard
+
+
+class UpdateCardIn(BaseModel):
+    question: str | None = None
+    properties: dict | None = None
+    difficulty: str | None = None
+
+
+class ReorderCardsIn(BaseModel):
+    card_ids: list[UUID]
+
+
+class SearchResultOut(BaseModel):
+    card_id: UUID
+    deck_id: UUID
+    deck_title: str
+    deck_kind: str
+    question: str
+    properties: dict
+    rank: float
+
+
+class SearchOut(BaseModel):
+    results: list[SearchResultOut]
+    total: int

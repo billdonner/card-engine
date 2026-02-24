@@ -170,3 +170,162 @@ async def get_stats() -> dict:
         "total_sources": total_sources,
         "decks_by_kind": {r["kind"]: r["cnt"] for r in kind_counts},
     }
+
+
+# ---------------------------------------------------------------------------
+# Studio CRUD helpers
+# ---------------------------------------------------------------------------
+
+import uuid
+
+
+async def create_deck(title: str, kind: str, properties: dict) -> asyncpg.Record:
+    """Create a new deck and return it."""
+    p = get_pool()
+    deck_id = uuid.uuid4()
+    return await p.fetchrow(
+        "INSERT INTO decks (id, title, kind, properties) "
+        "VALUES ($1, $2, $3::deck_kind, $4) "
+        "RETURNING id, title, kind, properties, card_count, created_at",
+        deck_id, title, kind, properties,
+    )
+
+
+async def update_deck(deck_id: str, title: str | None, properties: dict | None) -> asyncpg.Record | None:
+    """Update deck metadata. Returns updated row or None if not found."""
+    p = get_pool()
+    sets: list[str] = []
+    params: list = []
+    idx = 1
+
+    if title is not None:
+        sets.append(f"title = ${idx}")
+        params.append(title)
+        idx += 1
+    if properties is not None:
+        sets.append(f"properties = ${idx}")
+        params.append(properties)
+        idx += 1
+
+    if not sets:
+        return await p.fetchrow(
+            "SELECT id, title, kind, properties, card_count, created_at FROM decks WHERE id = $1",
+            deck_id,
+        )
+
+    params.append(deck_id)
+    sql = (
+        f"UPDATE decks SET {', '.join(sets)} "
+        f"WHERE id = ${idx} "
+        f"RETURNING id, title, kind, properties, card_count, created_at"
+    )
+    return await p.fetchrow(sql, *params)
+
+
+async def delete_deck(deck_id: str) -> bool:
+    """Delete a deck and its cards (cascade). Returns True if deleted."""
+    p = get_pool()
+    result = await p.execute("DELETE FROM decks WHERE id = $1", deck_id)
+    return result == "DELETE 1"
+
+
+async def create_card(deck_id: str, question: str, properties: dict, difficulty: str) -> asyncpg.Record:
+    """Create a new card in the given deck."""
+    p = get_pool()
+    card_id = uuid.uuid4()
+    # Get next position
+    max_pos = await p.fetchval(
+        "SELECT COALESCE(MAX(position), -1) FROM cards WHERE deck_id = $1", deck_id
+    )
+    position = max_pos + 1
+    return await p.fetchrow(
+        "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "
+        "VALUES ($1, $2, $3, $4, $5, $6::difficulty) "
+        "RETURNING id, deck_id, position, question, properties, difficulty, source_url, source_date",
+        card_id, deck_id, position, question, properties, difficulty,
+    )
+
+
+async def update_card(
+    card_id: str, question: str | None, properties: dict | None, difficulty: str | None
+) -> asyncpg.Record | None:
+    """Update a card. Returns updated row or None if not found."""
+    p = get_pool()
+    sets: list[str] = []
+    params: list = []
+    idx = 1
+
+    if question is not None:
+        sets.append(f"question = ${idx}")
+        params.append(question)
+        idx += 1
+    if properties is not None:
+        sets.append(f"properties = ${idx}")
+        params.append(properties)
+        idx += 1
+    if difficulty is not None:
+        sets.append(f"difficulty = ${idx}::difficulty")
+        params.append(difficulty)
+        idx += 1
+
+    if not sets:
+        return await p.fetchrow(
+            "SELECT id, deck_id, position, question, properties, difficulty, source_url, source_date "
+            "FROM cards WHERE id = $1",
+            card_id,
+        )
+
+    params.append(card_id)
+    sql = (
+        f"UPDATE cards SET {', '.join(sets)} "
+        f"WHERE id = ${idx} "
+        f"RETURNING id, deck_id, position, question, properties, difficulty, source_url, source_date"
+    )
+    return await p.fetchrow(sql, *params)
+
+
+async def delete_card(card_id: str) -> bool:
+    """Delete a card. Returns True if deleted."""
+    p = get_pool()
+    result = await p.execute("DELETE FROM cards WHERE id = $1", card_id)
+    return result == "DELETE 1"
+
+
+async def reorder_cards(deck_id: str, card_ids: list[str]) -> list[asyncpg.Record]:
+    """Reorder cards in a deck by updating positions to match card_ids order."""
+    p = get_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            for pos, cid in enumerate(card_ids):
+                await conn.execute(
+                    "UPDATE cards SET position = $1 WHERE id = $2 AND deck_id = $3",
+                    pos, cid, deck_id,
+                )
+    return await p.fetch(
+        "SELECT id, deck_id, position, question, properties, difficulty, source_url, source_date "
+        "FROM cards WHERE deck_id = $1 ORDER BY position",
+        deck_id,
+    )
+
+
+async def search_cards(query: str, limit: int = 20) -> tuple[list[asyncpg.Record], int]:
+    """Full-text search across card questions. Returns (rows, total)."""
+    p = get_pool()
+    tsquery = " & ".join(query.strip().split())
+
+    count_sql = (
+        "SELECT COUNT(*) FROM cards c JOIN decks d ON d.id = c.deck_id "
+        "WHERE to_tsvector('english', c.question) @@ to_tsquery('english', $1)"
+    )
+    total = await p.fetchval(count_sql, tsquery)
+
+    rows = await p.fetch(
+        "SELECT c.id AS card_id, c.deck_id, d.title AS deck_title, d.kind::text AS deck_kind, "
+        "       c.question, c.properties, "
+        "       ts_rank(to_tsvector('english', c.question), to_tsquery('english', $1)) AS rank "
+        "FROM cards c JOIN decks d ON d.id = c.deck_id "
+        "WHERE to_tsvector('english', c.question) @@ to_tsquery('english', $1) "
+        "ORDER BY rank DESC LIMIT $2",
+        tsquery, limit,
+    )
+    return rows, total
