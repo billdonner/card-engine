@@ -97,3 +97,25 @@ class CategoryOut(BaseModel):
 class CategoriesOut(BaseModel):
     categories: list[CategoryOut]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Ingestion pipeline
+# ---------------------------------------------------------------------------
+
+class IngestionStatusOut(BaseModel):
+    state: str  # stopped, running, paused
+    stats: dict
+    config: dict
+    message: str | None = None
+
+
+class SourceRunOut(BaseModel):
+    id: UUID
+    provider_name: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    items_fetched: int
+    items_added: int
+    items_skipped: int
+    error: str | None = None

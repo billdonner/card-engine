@@ -26,7 +26,21 @@ PORT = int(os.environ.get("CE_PORT", "9810"))
 async def lifespan(app: FastAPI):
     await init_pool()
     logger.info("Database pool initialized")
+
+    # Initialize ingestion daemon
+    from server.providers.daemon import IngestionConfig, IngestionDaemon
+
+    config = IngestionConfig()
+    daemon = IngestionDaemon(pool=get_pool(), config=config)
+    app.state.daemon = daemon
+    if config.auto_start:
+        await daemon.start()
+        logger.info("Ingestion daemon auto-started")
+
     yield
+
+    await daemon.stop()
+    logger.info("Ingestion daemon stopped")
     await close_pool()
     logger.info("Database pool closed")
 
@@ -57,10 +71,12 @@ app.add_middleware(
 from server.adapters.generic import router as generic_router  # noqa: E402
 from server.adapters.flashcards import router as flashcards_router  # noqa: E402
 from server.adapters.trivia import router as trivia_router  # noqa: E402
+from server.providers.routes import router as ingestion_router  # noqa: E402
 
 app.include_router(generic_router)
 app.include_router(flashcards_router)
 app.include_router(trivia_router)
+app.include_router(ingestion_router)
 
 
 # ---------------------------------------------------------------------------
