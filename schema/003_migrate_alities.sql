@@ -1,0 +1,56 @@
+-- Migrate existing Alities data into the unified card-engine schema.
+-- Run this against a card-engine database that already has 001_initial.sql applied.
+--
+-- This file documents the exact mapping from Alities → card-engine.
+
+-- Step 1: Migrate source providers
+-- Alities: question_sources(id UUID, name, type source_type, question_count, created_at, updated_at)
+-- card-engine: source_providers(id UUID, name, type source_type, ...)
+--
+-- INSERT INTO source_providers (id, name, type, created_at, updated_at)
+-- SELECT id, name, type, created_at, updated_at
+-- FROM alities_source.question_sources;
+
+-- Step 2: Migrate categories → decks
+-- Alities: categories(id UUID, name, description, choice_count, is_auto_generated, created_at, updated_at)
+-- card-engine: decks(id UUID, title, kind, properties JSONB, ...)
+--
+-- INSERT INTO decks (id, title, kind, properties, created_at, updated_at)
+-- SELECT
+--     id,
+--     name,
+--     'trivia',
+--     jsonb_build_object(
+--         'description', description,
+--         'choice_count', COALESCE(choice_count, 4),
+--         'is_auto_generated', COALESCE(is_auto_generated, true)
+--     ),
+--     0,              -- card_count will be updated by trigger
+--     created_at,
+--     updated_at
+-- FROM alities_source.categories;
+
+-- Step 3: Migrate questions → cards
+-- Alities: questions(id UUID, text, choices JSONB, correct_choice_index, category_id, source_id,
+--                     difficulty, explanation, hint, created_at, updated_at)
+-- card-engine: cards(id UUID, deck_id, position, question, properties JSONB, difficulty, source_id, ...)
+--
+-- INSERT INTO cards (id, deck_id, position, question, properties, difficulty, source_id, created_at)
+-- SELECT
+--     q.id,
+--     q.category_id,                    -- category_id maps directly to deck id (preserved UUIDs)
+--     ROW_NUMBER() OVER (PARTITION BY q.category_id ORDER BY q.created_at),  -- assign positions
+--     q.text,
+--     jsonb_build_object(
+--         'choices', q.choices->'items',  -- alities stores as {"items": [...]}
+--         'correct_index', q.correct_choice_index,
+--         'explanation', q.explanation,
+--         'hint', q.hint
+--     ),
+--     q.difficulty,
+--     q.source_id,
+--     q.created_at
+-- FROM alities_source.questions q;
+
+-- Note: After migration, card_count on decks will be updated automatically
+-- by the trg_card_count trigger from 001_initial.sql.
