@@ -1,0 +1,21 @@
+[project]
+name = "card-engine"
+version = "0.1.0"
+description = "Unified content backend for Flasherz and Alities apps"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "asyncpg>=0.30",
+    "pydantic>=2.10",
+]
+
+[tool.setuptools.packages.find]
+include = ["server*"]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
