@@ -56,12 +56,12 @@ PostgreSQL with the unified schema in `schema/001_initial.sql`.
 | Repo | Path | Relationship |
 |------|------|-------------|
 | obo (hub) | `~/obo` | Planning docs |
-| obo-server | `~/obo-server` | Being replaced by this |
-| obo-gen | `~/obo-gen` | Swift CLI tool, will write to card-engine DB |
-| obo-ios | `~/obo-ios` | Current flashcard app |
+| obo-server | `~/obo-server` | Retired — replaced by this |
+| obo-gen | `~/obo-gen` | Swift CLI tool, writes decks to card-engine DB |
+| obo-ios | `~/obo-ios` | Flashcard app (consumes `/api/v1/flashcards`) |
 | flasherz-ios | `~/flasherz-ios` | Future flashcard app (will consume card-engine API) |
-| alities-engine | `~/alities-engine` | Being replaced by this |
-| alities-mobile | `~/alities-mobile` | Will consume card-engine API |
+| alities-engine | `~/alities-engine` | Retired — ingestion pipeline ported here |
+| alities-mobile | `~/alities-mobile` | Trivia app (consumes `/api/v1/trivia` + `/api/v1/ingestion`) |
 
 ## Server
 
