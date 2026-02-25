@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import random
 import uuid
-from datetime import datetime, timezone
+from collections import defaultdict
 
 import asyncpg
 
@@ -19,132 +19,298 @@ logger = logging.getLogger("card_engine.family.generator")
 
 
 # ---------------------------------------------------------------------------
-# Template definitions
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _flashcard_templates(rel: NamedRelation) -> list[tuple[str, str, int]]:
-    """Return (question, answer, difficulty) tuples for a relation."""
+def _display_name(p: Person) -> str:
+    """Prefer nickname — more natural and fun for kids."""
+    return p.nickname if p.nickname else p.name
+
+
+def _base_label(label: str) -> str:
+    """Strip side qualifiers for grouping: 'paternal grandparent' → 'grandparent'."""
+    for prefix in ("paternal ", "maternal "):
+        if label.startswith(prefix):
+            return label[len(prefix):]
+    if label == "aunt/uncle (by marriage)":
+        return "aunt/uncle"
+    return label
+
+
+_DIFFICULTY_MAP = {1: "easy", 2: "medium", 3: "hard", 4: "hard"}
+
+
+# ---------------------------------------------------------------------------
+# Flashcard templates
+# ---------------------------------------------------------------------------
+
+def _flashcard_templates(
+    rel: NamedRelation,
+    all_relations: list[NamedRelation],
+    player_name: str,
+) -> list[tuple[str, str, int]]:
+    """Return (question, answer, difficulty) tuples for one relation.
+
+    Uses the person's name/nickname IN the question to avoid ambiguity
+    when multiple people share the same label (e.g. two parents).
+    """
     p = rel.person
+    dn = _display_name(p)
     cards: list[tuple[str, str, int]] = []
 
-    # Core question
+    # --- Core: identify the relationship using the person's name ---
     cards.append((
-        f"Who is your {rel.label}?",
-        p.name,
+        f"How is {dn} related to you?",
+        f"Your {rel.label}",
         rel.difficulty,
     ))
 
-    # Nickname question
+    # Only ask "Who is your X?" when this person is the ONLY one with that label
+    same_label = [r for r in all_relations if r.label == rel.label]
+    if len(same_label) == 1:
+        cards.append((
+            f"Who is your {rel.label}?",
+            dn,
+            rel.difficulty,
+        ))
+
+    # --- Nickname questions (fun for kids) ---
     if p.nickname:
         cards.append((
             f"What is {p.nickname}'s real name?",
             p.name,
-            rel.difficulty,
+            max(1, rel.difficulty - 1),
         ))
         cards.append((
-            f"What do you call {p.name}?",
+            f"What do we call {p.name} in our family?",
             p.nickname,
-            rel.difficulty,
+            max(1, rel.difficulty - 1),
         ))
 
-    # Maiden name question
+    # --- Maiden name ---
     if p.maiden_name:
         cards.append((
-            f"What was {p.name}'s maiden name?",
+            f"What was {dn}'s last name before getting married?",
             p.maiden_name,
-            min(rel.difficulty + 1, 3),
+            min(rel.difficulty + 1, 4),
         ))
 
-    # Birth year question
+    # --- Birth year ---
     if p.born:
         cards.append((
-            f"When was {p.name} born?",
+            f"What year was {dn} born?",
             str(p.born),
-            min(rel.difficulty + 1, 3),
+            min(rel.difficulty + 1, 4),
         ))
 
     return cards
 
+
+def _bonus_flashcards(
+    all_relations: list[NamedRelation],
+    player_name: str,
+) -> list[tuple[str, str, int]]:
+    """Group, counting, and connection questions across the whole tree."""
+    cards: list[tuple[str, str, int]] = []
+
+    # Group by base label for counting
+    groups: dict[str, list[NamedRelation]] = defaultdict(list)
+    for r in all_relations:
+        groups[_base_label(r.label)].append(r)
+
+    # --- Counting & naming questions ---
+    for base, group in groups.items():
+        if len(group) < 2:
+            continue
+        plural = base + "s"
+        if "aunt/uncle" in base:
+            plural = "aunts and uncles"
+
+        cards.append((
+            f"How many {plural} do you have?",
+            str(len(group)),
+            2,
+        ))
+        if len(group) <= 5:
+            names = sorted(_display_name(r.person) for r in group)
+            cards.append((
+                f"Can you name all your {plural}?",
+                ", ".join(names),
+                3,
+            ))
+
+    # --- Twins detection (siblings born same year) ---
+    siblings = groups.get("sibling", [])
+    if len(siblings) >= 2:
+        by_year: dict[int, list[NamedRelation]] = defaultdict(list)
+        for r in siblings:
+            if r.person.born:
+                by_year[r.person.born].append(r)
+        for _year, twins in by_year.items():
+            if len(twins) >= 2:
+                twin_names = sorted(_display_name(r.person) for r in twins)
+                cards.append((
+                    "Who are the twins in your family?",
+                    " and ".join(twin_names),
+                    1,
+                ))
+
+    # --- Oldest / youngest sibling ---
+    if len(siblings) >= 2:
+        born_sibs = [(r, r.person.born) for r in siblings if r.person.born]
+        if len(born_sibs) >= 2:
+            oldest = min(born_sibs, key=lambda x: x[1])
+            youngest = max(born_sibs, key=lambda x: x[1])
+            if oldest[0].person.id != youngest[0].person.id:
+                cards.append((
+                    "Who is your oldest sibling?",
+                    _display_name(oldest[0].person),
+                    2,
+                ))
+
+    # --- Oldest / youngest cousin ---
+    cousins = groups.get("cousin", [])
+    if len(cousins) >= 2:
+        born_cousins = [(r, r.person.born) for r in cousins if r.person.born]
+        if len(born_cousins) >= 2:
+            oldest = min(born_cousins, key=lambda x: x[1])
+            youngest = max(born_cousins, key=lambda x: x[1])
+            if oldest[0].person.id != youngest[0].person.id:
+                cards.append((
+                    "Who is the oldest cousin?",
+                    _display_name(oldest[0].person),
+                    2,
+                ))
+                cards.append((
+                    "Who is the youngest cousin?",
+                    _display_name(youngest[0].person),
+                    2,
+                ))
+
+    # --- Nickname count ---
+    nicknamed = [r for r in all_relations if r.person.nickname]
+    if len(nicknamed) >= 2:
+        cards.append((
+            "How many family members have special nicknames?",
+            str(len(nicknamed)),
+            2,
+        ))
+
+    # --- Total relatives ---
+    cards.append((
+        "How many relatives are in your family tree?",
+        str(len(all_relations)),
+        3,
+    ))
+
+    return cards
+
+
+# ---------------------------------------------------------------------------
+# Trivia templates
+# ---------------------------------------------------------------------------
 
 def _trivia_templates(
     rel: NamedRelation,
     all_relations: list[NamedRelation],
     player_name: str,
 ) -> list[dict]:
-    """Return trivia card dicts with multiple choice distractors."""
+    """Return trivia card dicts with multiple-choice answers."""
     p = rel.person
+    dn = _display_name(p)
     cards: list[dict] = []
 
-    # Collect same-generation names for distractors
-    same_gen = [
-        r.person.name for r in all_relations
-        if r.person.id != p.id and abs(r.generation - rel.generation) <= 1
+    # Name pool for distractors
+    name_pool = [
+        _display_name(r.person) for r in all_relations
+        if r.person.id != p.id
     ]
 
-    def _distractors(correct: str, pool: list[str]) -> list[str]:
-        options = [n for n in pool if n != correct]
+    # Label pool for relationship distractors
+    all_labels = list({r.label for r in all_relations})
+
+    def _name_distractors(correct: str) -> list[str]:
+        options = [n for n in name_pool if n != correct]
         random.shuffle(options)
         result = options[:3]
         while len(result) < 3:
             result.append(f"Not {correct}")
         return result
 
-    def _make_trivia(question: str, answer: str, diff: int) -> dict:
-        wrong = _distractors(answer, same_gen)
+    def _label_distractors(correct: str) -> list[str]:
+        options = [lbl for lbl in all_labels if lbl != correct]
+        random.shuffle(options)
+        result = options[:3]
+        while len(result) < 3:
+            result.append("no relation")
+        return result
+
+    def _make_trivia(question: str, answer: str, diff: int,
+                     distractors: list[str], explanation: str, hint: str) -> dict:
         correct_idx = random.randint(0, 3)
-        all_answers = list(wrong)
+        all_answers = list(distractors[:3])
         all_answers.insert(correct_idx, answer)
-        choices = [
-            {"text": text, "isCorrect": i == correct_idx}
-            for i, text in enumerate(all_answers)
-        ]
-        difficulty_map = {1: "easy", 2: "medium", 3: "hard", 4: "hard"}
-        return {
-            "question": question,
-            "choices": choices,
-            "correct_index": correct_idx,
-            "explanation": f"{answer} is {player_name}'s {rel.label}.",
-            "hint": f"Think about your {rel.label}.",
-            "difficulty": difficulty_map.get(diff, "medium"),
-        }
-
-    cards.append(_make_trivia(
-        f"Who is {player_name}'s {rel.label}?",
-        p.name,
-        rel.difficulty,
-    ))
-
-    if p.nickname:
-        cards.append(_make_trivia(
-            f"What is {p.nickname}'s real name?",
-            p.name,
-            rel.difficulty,
-        ))
-
-    if p.maiden_name:
-        maiden_pool = [
-            r.person.maiden_name for r in all_relations
-            if r.person.maiden_name and r.person.id != p.id
-        ]
-        wrong = maiden_pool[:3] if maiden_pool else _distractors(p.maiden_name, same_gen)
-        correct_idx = random.randint(0, min(3, len(wrong)))
-        all_answers = list(wrong[:3])
-        while len(all_answers) < 3:
-            all_answers.append(f"Not {p.maiden_name}")
-        all_answers.insert(correct_idx, p.maiden_name)
         all_answers = all_answers[:4]
         choices = [
             {"text": text, "isCorrect": i == correct_idx}
             for i, text in enumerate(all_answers)
         ]
-        cards.append({
-            "question": f"What was {p.name}'s maiden name?",
+        return {
+            "question": question,
             "choices": choices,
             "correct_index": correct_idx,
-            "explanation": f"{p.name}'s maiden name was {p.maiden_name}.",
-            "hint": "Think about family names.",
-            "difficulty": "medium" if rel.difficulty <= 2 else "hard",
-        })
+            "explanation": explanation,
+            "hint": hint,
+            "difficulty": _DIFFICULTY_MAP.get(diff, "medium"),
+        }
+
+    # --- "How is X related to player?" — always unambiguous ---
+    cards.append(_make_trivia(
+        f"How is {dn} related to {player_name}?",
+        rel.label,
+        rel.difficulty,
+        _label_distractors(rel.label),
+        f"{dn} is {player_name}'s {rel.label}.",
+        f"Think about how {dn} fits in the family.",
+    ))
+
+    # --- "Who is player's X?" only when unique ---
+    same_label = [r for r in all_relations if r.label == rel.label]
+    if len(same_label) == 1:
+        cards.append(_make_trivia(
+            f"Who is {player_name}'s {rel.label}?",
+            dn,
+            rel.difficulty,
+            _name_distractors(dn),
+            f"{dn} is {player_name}'s {rel.label}.",
+            f"Think about your {rel.label}.",
+        ))
+
+    # --- Nickname trivia ---
+    if p.nickname:
+        cards.append(_make_trivia(
+            f"What is {p.nickname}'s real name?",
+            p.name,
+            max(1, rel.difficulty - 1),
+            _name_distractors(p.name),
+            f"{p.nickname}'s real name is {p.name}.",
+            "Think about family nicknames!",
+        ))
+
+    # --- Maiden name trivia ---
+    if p.maiden_name:
+        maiden_pool = [
+            r.person.maiden_name for r in all_relations
+            if r.person.maiden_name and r.person.id != p.id
+        ] or _name_distractors(p.maiden_name)
+        cards.append(_make_trivia(
+            f"What was {dn}'s last name before getting married?",
+            p.maiden_name,
+            min(rel.difficulty + 1, 4),
+            maiden_pool,
+            f"{dn}'s maiden name was {p.maiden_name}.",
+            "Think about family names before marriage.",
+        ))
 
     return cards
 
@@ -227,18 +393,30 @@ async def generate_decks(
 
         if kind == "flashcard":
             for rel in relations:
-                for question, answer, diff in _flashcard_templates(rel):
+                for question, answer, diff in _flashcard_templates(rel, relations, player_name):
                     card_id = uuid.uuid4()
-                    difficulty_map = {1: "easy", 2: "medium", 3: "hard", 4: "hard"}
                     await pool.execute(
                         "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "
                         "VALUES ($1, $2, $3, $4, $5, $6::difficulty)",
                         card_id, deck_id, position, question,
                         {"answer": answer},
-                        difficulty_map.get(diff, "medium"),
+                        _DIFFICULTY_MAP.get(diff, "medium"),
                     )
                     position += 1
                     total_cards += 1
+
+            # Bonus group/counting/connection cards
+            for question, answer, diff in _bonus_flashcards(relations, player_name):
+                card_id = uuid.uuid4()
+                await pool.execute(
+                    "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "
+                    "VALUES ($1, $2, $3, $4, $5, $6::difficulty)",
+                    card_id, deck_id, position, question,
+                    {"answer": answer},
+                    _DIFFICULTY_MAP.get(diff, "medium"),
+                )
+                position += 1
+                total_cards += 1
 
         elif kind == "trivia":
             for rel in relations:
