@@ -73,12 +73,14 @@ from server.adapters.flashcards import router as flashcards_router  # noqa: E402
 from server.adapters.trivia import router as trivia_router  # noqa: E402
 from server.adapters.studio import router as studio_router  # noqa: E402
 from server.providers.routes import router as ingestion_router  # noqa: E402
+from server.family.routes import router as family_router  # noqa: E402
 
 app.include_router(generic_router)
 app.include_router(flashcards_router)
 app.include_router(trivia_router)
 app.include_router(studio_router)
 app.include_router(ingestion_router)
+app.include_router(family_router)
 
 
 # ---------------------------------------------------------------------------
