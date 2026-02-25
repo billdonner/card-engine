@@ -165,6 +165,7 @@ async def update_person(family_id: UUID, person_id: UUID, body: UpdatePersonIn) 
         maiden_name=body.maiden_name,
         born=body.born,
         status=body.status,
+        gender=body.gender,
         notes=body.notes,
         player=body.player,
         placeholder=body.placeholder,
