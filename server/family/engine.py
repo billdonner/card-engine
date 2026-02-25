@@ -19,6 +19,7 @@ class Person:
     maiden_name: str | None = None
     born: int | None = None
     status: str = "living"
+    gender: str | None = None  # "M" or "F"
     player: bool = False
     placeholder: bool = False
 
@@ -35,9 +36,29 @@ class Relationship:
 class NamedRelation:
     """A resolved relationship label from the player's perspective."""
     person: Person
-    label: str  # e.g. "maternal grandmother", "sibling", "paternal uncle"
+    label: str  # e.g. "maternal grandmother", "sister", "paternal uncle"
     generation: int  # 0=same, 1=parent, 2=grandparent, -1=child
     difficulty: int  # 1=easy, 2=medium, 3=hard, 4=chain
+
+
+def _gendered(base: str, gender: str | None) -> str:
+    """Apply gender to a relationship label. Falls back to neutral if unknown."""
+    if not gender:
+        return base
+    _MAP = {
+        "parent":          ("father", "mother"),
+        "sibling":         ("brother", "sister"),
+        "grandparent":     ("grandfather", "grandmother"),
+        "great-grandparent": ("great-grandfather", "great-grandmother"),
+        "aunt/uncle":      ("uncle", "aunt"),
+        "aunt/uncle (by marriage)": ("uncle (by marriage)", "aunt (by marriage)"),
+        "great-aunt/uncle": ("great-uncle", "great-aunt"),
+        "spouse":          ("husband", "wife"),
+    }
+    pair = _MAP.get(base)
+    if not pair:
+        return base
+    return pair[0] if gender == "M" else pair[1]
 
 
 class FamilyGraph:
@@ -77,8 +98,6 @@ class FamilyGraph:
         parents = self._parents_of(player_id)
         if len(parents) < 2:
             return ""
-        # Heuristic: first parent listed is typically one side
-        # We trace which parent branch this ancestor comes from
         for i, pid in enumerate(parents):
             if self._is_ancestor_of(parent_id, pid):
                 return "maternal" if i == 1 else "paternal"
@@ -112,7 +131,10 @@ class FamilyGraph:
             if not p:
                 continue
             seen.add(pid)
-            results.append(NamedRelation(person=p, label="parent", generation=1, difficulty=1))
+            results.append(NamedRelation(
+                person=p, label=_gendered("parent", p.gender),
+                generation=1, difficulty=1,
+            ))
 
         # --- Siblings (generation 0, difficulty 1) ---
         siblings: set[str] = set()
@@ -125,7 +147,10 @@ class FamilyGraph:
             if not s:
                 continue
             seen.add(sid)
-            results.append(NamedRelation(person=s, label="sibling", generation=0, difficulty=1))
+            results.append(NamedRelation(
+                person=s, label=_gendered("sibling", s.gender),
+                generation=0, difficulty=1,
+            ))
 
         # --- Grandparents (generation +2, difficulty 2) ---
         grandparents: list[tuple[str, str]] = []  # (gp_id, side)
@@ -140,7 +165,8 @@ class FamilyGraph:
             if not gp or gp_id in seen:
                 continue
             seen.add(gp_id)
-            label = f"{side} grandparent".strip() if side else "grandparent"
+            base = _gendered("grandparent", gp.gender)
+            label = f"{side} {base}".strip() if side else base
             results.append(NamedRelation(person=gp, label=label, generation=2, difficulty=2))
 
         # --- Great-grandparents (generation +3, difficulty 3) ---
@@ -150,7 +176,8 @@ class FamilyGraph:
                 if not ggp or ggp_id in seen:
                     continue
                 seen.add(ggp_id)
-                label = f"{side} great-grandparent".strip() if side else "great-grandparent"
+                base = _gendered("great-grandparent", ggp.gender)
+                label = f"{side} {base}".strip() if side else base
                 results.append(NamedRelation(person=ggp, label=label, generation=3, difficulty=3))
 
         # --- Aunts/Uncles (generation +1, difficulty 2) ---
@@ -167,14 +194,20 @@ class FamilyGraph:
             if not au or au_id in seen:
                 continue
             seen.add(au_id)
-            results.append(NamedRelation(person=au, label="aunt/uncle", generation=1, difficulty=2))
+            results.append(NamedRelation(
+                person=au, label=_gendered("aunt/uncle", au.gender),
+                generation=1, difficulty=2,
+            ))
 
             # Their spouses are also aunts/uncles (by marriage)
             for sp_id in self._spouses_of(au_id):
                 sp = self._get(sp_id)
                 if sp and sp_id not in seen:
                     seen.add(sp_id)
-                    results.append(NamedRelation(person=sp, label="aunt/uncle (by marriage)", generation=1, difficulty=2))
+                    results.append(NamedRelation(
+                        person=sp, label=_gendered("aunt/uncle (by marriage)", sp.gender),
+                        generation=1, difficulty=2,
+                    ))
 
         # --- Great-aunts/uncles (generation +2, difficulty 3) ---
         for gp_id, side in grandparents:
@@ -185,7 +218,8 @@ class FamilyGraph:
                         gau = self._get(gau_id)
                         if gau:
                             seen.add(gau_id)
-                            label = f"{side} great-aunt/uncle".strip() if side else "great-aunt/uncle"
+                            base = _gendered("great-aunt/uncle", gau.gender)
+                            label = f"{side} {base}".strip() if side else base
                             results.append(NamedRelation(person=gau, label=label, generation=2, difficulty=3))
 
         # --- Cousins (generation 0, difficulty 3) ---
@@ -196,14 +230,14 @@ class FamilyGraph:
                     seen.add(cousin_id)
                     results.append(NamedRelation(person=cousin, label="cousin", generation=0, difficulty=3))
 
-        # --- Spouses of player (generation 0, difficulty 1) — unlikely for children but complete ---
+        # --- Spouses of player (generation 0, difficulty 1) ---
         for sp_id in self._spouses_of(player_id):
             sp = self._get(sp_id)
             if sp and sp_id not in seen:
                 seen.add(sp_id)
-                results.append(NamedRelation(person=sp, label="spouse", generation=0, difficulty=1))
-
-        # --- In-laws: spouses of parents' siblings ---
-        # Already handled above via aunt/uncle by marriage
+                results.append(NamedRelation(
+                    person=sp, label=_gendered("spouse", sp.gender),
+                    generation=0, difficulty=1,
+                ))
 
         return results

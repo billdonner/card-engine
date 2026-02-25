@@ -55,6 +55,7 @@ async def create_person(
     maiden_name: str | None = None,
     born: int | None = None,
     status: str = "living",
+    gender: str | None = None,
     notes: str | None = None,
     player: bool = False,
     placeholder: bool = False,
@@ -64,11 +65,11 @@ async def create_person(
     pid = uuid.uuid4()
     return await p.fetchrow(
         "INSERT INTO family_people "
-        "(id, family_id, name, nickname, maiden_name, born, status, notes, player, placeholder, photo_url) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7::person_status, $8, $9, $10, $11) "
-        "RETURNING id, family_id, name, nickname, maiden_name, born, status, notes, "
+        "(id, family_id, name, nickname, maiden_name, born, status, gender, notes, player, placeholder, photo_url) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7::person_status, $8, $9, $10, $11, $12) "
+        "RETURNING id, family_id, name, nickname, maiden_name, born, status, gender, notes, "
         "player, placeholder, photo_url, created_at, updated_at",
-        pid, family_id, name, nickname, maiden_name, born, status, notes,
+        pid, family_id, name, nickname, maiden_name, born, status, gender, notes,
         player, placeholder, photo_url,
     )
 
@@ -76,7 +77,7 @@ async def create_person(
 async def update_person(person_id: str, **kwargs) -> asyncpg.Record | None:
     p = get_pool()
     allowed = {
-        "name", "nickname", "maiden_name", "born", "status", "notes",
+        "name", "nickname", "maiden_name", "born", "status", "gender", "notes",
         "player", "placeholder", "photo_url",
     }
     sets: list[str] = []
@@ -120,7 +121,7 @@ async def delete_person(person_id: str) -> bool:
 async def list_people(family_id: str) -> list[asyncpg.Record]:
     p = get_pool()
     return await p.fetch(
-        "SELECT id, family_id, name, nickname, maiden_name, born, status, notes, "
+        "SELECT id, family_id, name, nickname, maiden_name, born, status, gender, notes, "
         "player, placeholder, photo_url, created_at, updated_at "
         "FROM family_people WHERE family_id = $1 ORDER BY name",
         family_id,
@@ -131,7 +132,7 @@ async def get_person_by_name(family_id: str, name: str) -> asyncpg.Record | None
     """Fuzzy name lookup — case-insensitive prefix match."""
     p = get_pool()
     return await p.fetchrow(
-        "SELECT id, family_id, name, nickname, maiden_name, born, status, notes, "
+        "SELECT id, family_id, name, nickname, maiden_name, born, status, gender, notes, "
         "player, placeholder, photo_url, created_at, updated_at "
         "FROM family_people WHERE family_id = $1 AND LOWER(name) = LOWER($2)",
         family_id, name,
@@ -145,7 +146,7 @@ async def find_person_fuzzy(family_id: str, name: str) -> asyncpg.Record | None:
         return row
     p = get_pool()
     return await p.fetchrow(
-        "SELECT id, family_id, name, nickname, maiden_name, born, status, notes, "
+        "SELECT id, family_id, name, nickname, maiden_name, born, status, gender, notes, "
         "player, placeholder, photo_url, created_at, updated_at "
         "FROM family_people WHERE family_id = $1 AND LOWER(name) LIKE '%' || LOWER($2) || '%' "
         "LIMIT 1",

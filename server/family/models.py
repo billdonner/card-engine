@@ -33,6 +33,7 @@ class CreatePersonIn(BaseModel):
     maiden_name: str | None = None
     born: int | None = None
     status: str = "living"
+    gender: str | None = None  # "M" or "F"
     notes: str | None = None
     player: bool = False
     placeholder: bool = False
@@ -45,6 +46,7 @@ class UpdatePersonIn(BaseModel):
     maiden_name: str | None = None
     born: int | None = None
     status: str | None = None
+    gender: str | None = None
     notes: str | None = None
     player: bool | None = None
     placeholder: bool | None = None
@@ -59,6 +61,7 @@ class PersonOut(BaseModel):
     maiden_name: str | None = None
     born: int | None = None
     status: str
+    gender: str | None = None
     notes: str | None = None
     player: bool
     placeholder: bool

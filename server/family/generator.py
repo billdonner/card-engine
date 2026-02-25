@@ -28,13 +28,28 @@ def _display_name(p: Person) -> str:
 
 
 def _base_label(label: str) -> str:
-    """Strip side qualifiers for grouping: 'paternal grandparent' → 'grandparent'."""
+    """Strip side + gender qualifiers for grouping.
+
+    'paternal grandmother' → 'grandparent', 'uncle' → 'aunt/uncle', etc.
+    """
+    # Strip side prefix
+    stripped = label
     for prefix in ("paternal ", "maternal "):
-        if label.startswith(prefix):
-            return label[len(prefix):]
-    if label == "aunt/uncle (by marriage)":
-        return "aunt/uncle"
-    return label
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):]
+            break
+    # Map gendered labels to neutral groups
+    _GROUP = {
+        "father": "parent", "mother": "parent",
+        "brother": "sibling", "sister": "sibling",
+        "grandfather": "grandparent", "grandmother": "grandparent",
+        "great-grandfather": "great-grandparent", "great-grandmother": "great-grandparent",
+        "uncle": "aunt/uncle", "aunt": "aunt/uncle",
+        "uncle (by marriage)": "aunt/uncle", "aunt (by marriage)": "aunt/uncle",
+        "great-uncle": "great-aunt/uncle", "great-aunt": "great-aunt/uncle",
+        "husband": "spouse", "wife": "spouse",
+    }
+    return _GROUP.get(stripped, stripped)
 
 
 _DIFFICULTY_MAP = {1: "easy", 2: "medium", 3: "hard", 4: "hard"}
@@ -342,6 +357,7 @@ async def generate_decks(
             maiden_name=p.get("maiden_name"),
             born=p.get("born"),
             status=p.get("status", "living"),
+            gender=p.get("gender"),
             player=p.get("player", False),
             placeholder=p.get("placeholder", False),
         )

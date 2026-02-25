@@ -39,6 +39,7 @@ CREATE TABLE family_people (
     maiden_name TEXT,
     born        INTEGER,                          -- birth year
     status      person_status NOT NULL DEFAULT 'living',
+    gender      TEXT,                             -- 'M' or 'F'
     notes       TEXT,
     player      BOOLEAN NOT NULL DEFAULT false,   -- is this person a child player?
     placeholder BOOLEAN NOT NULL DEFAULT false,   -- incomplete record needing more info
