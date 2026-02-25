@@ -360,6 +360,9 @@ async def generate_decks(
     graph = FamilyGraph(engine_people, engine_rels)
     relations = graph.compute_relations(player_id)
 
+    # Skip deceased people — don't generate questions about them
+    relations = [r for r in relations if r.person.status != "deceased"]
+
     if not relations:
         return [], 0
 
