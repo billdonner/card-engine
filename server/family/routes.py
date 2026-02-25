@@ -332,9 +332,25 @@ async def get_chat_history(family_id: UUID) -> ChatHistoryOut:
     row = await fdb.get_chat_history(str(family_id))
     if row is None:
         raise HTTPException(404, "No chat history found")
+    # Normalise messages: handle double-encoded strings from earlier bug
+    raw = row["messages"] or []
+    messages = []
+    for item in raw:
+        if isinstance(item, dict):
+            messages.append(item)
+        elif isinstance(item, str):
+            import json as _json
+            try:
+                parsed = _json.loads(item)
+                if isinstance(parsed, dict):
+                    messages.append(parsed)
+                elif isinstance(parsed, list):
+                    messages.extend(m for m in parsed if isinstance(m, dict))
+            except (ValueError, TypeError):
+                pass
     return ChatHistoryOut(
         session_id=row["id"],
-        messages=row["messages"] or [],
+        messages=messages,
     )
 
 

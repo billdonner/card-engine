@@ -218,15 +218,13 @@ async def get_or_create_chat_session(family_id: str) -> asyncpg.Record:
 async def append_chat_message(session_id: str, role: str, content: str) -> None:
     """Append a message to the JSONB messages array."""
     p = get_pool()
-    import json
-    # Wrap in a list so || appends the object as an array element,
-    # not as a merged scalar (avoids double-encoding by asyncpg).
-    msg = json.dumps([{"role": role, "content": content}])
+    # Use jsonb_build_object + array append to avoid asyncpg double-encoding
     await p.execute(
         "UPDATE family_chat_sessions "
-        "SET messages = messages || $1::jsonb "
-        "WHERE id = $2",
-        msg, session_id,
+        "SET messages = messages || jsonb_build_array(jsonb_build_object('role', $1::text, 'content', $2::text)), "
+        "    updated_at = now() "
+        "WHERE id = $3",
+        role, content, session_id,
     )
 
 
