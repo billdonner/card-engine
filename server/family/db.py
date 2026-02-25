@@ -96,7 +96,7 @@ async def update_person(person_id: str, **kwargs) -> asyncpg.Record | None:
 
     if not sets:
         return await p.fetchrow(
-            "SELECT id, family_id, name, nickname, maiden_name, born, status, notes, "
+            "SELECT id, family_id, name, nickname, maiden_name, born, status, gender, notes, "
             "player, placeholder, photo_url, created_at, updated_at "
             "FROM family_people WHERE id = $1",
             person_id,
@@ -106,7 +106,7 @@ async def update_person(person_id: str, **kwargs) -> asyncpg.Record | None:
     sql = (
         f"UPDATE family_people SET {', '.join(sets)} "
         f"WHERE id = ${idx} "
-        f"RETURNING id, family_id, name, nickname, maiden_name, born, status, notes, "
+        f"RETURNING id, family_id, name, nickname, maiden_name, born, status, gender, notes, "
         f"player, placeholder, photo_url, created_at, updated_at"
     )
     return await p.fetchrow(sql, *params)
