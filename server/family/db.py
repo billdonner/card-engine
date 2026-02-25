@@ -219,7 +219,9 @@ async def append_chat_message(session_id: str, role: str, content: str) -> None:
     """Append a message to the JSONB messages array."""
     p = get_pool()
     import json
-    msg = json.dumps({"role": role, "content": content})
+    # Wrap in a list so || appends the object as an array element,
+    # not as a merged scalar (avoids double-encoding by asyncpg).
+    msg = json.dumps([{"role": role, "content": content}])
     await p.execute(
         "UPDATE family_chat_sessions "
         "SET messages = messages || $1::jsonb "

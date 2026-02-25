@@ -282,7 +282,20 @@ async def chat_builder(family_id: UUID, body: ChatMessageIn) -> ChatResponseOut:
 
     # Get chat session + history
     session = await fdb.get_or_create_chat_session(str(family_id))
-    history = session["messages"] if session["messages"] else []
+    raw_messages = session["messages"] if session["messages"] else []
+    # Ensure each entry is a dict (guard against double-encoded strings)
+    history = []
+    for msg in raw_messages:
+        if isinstance(msg, dict):
+            history.append(msg)
+        elif isinstance(msg, str):
+            import json as _json
+            try:
+                parsed = _json.loads(msg)
+                if isinstance(parsed, dict):
+                    history.append(parsed)
+            except (ValueError, TypeError):
+                pass
 
     # Call LLM
     people_dicts = [dict(p) for p in people]
