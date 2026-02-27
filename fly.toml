@@ -1,4 +1,4 @@
-app = "bd-card-engine"
+app = "bd-cardzerver"
 primary_region = "ewr"
 
 [env]
