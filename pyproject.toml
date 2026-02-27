@@ -9,6 +9,7 @@ dependencies = [
     "asyncpg>=0.30",
     "pydantic>=2.10",
     "httpx>=0.28",
+    "psutil>=6.0",
 ]
 
 [tool.setuptools.packages.find]

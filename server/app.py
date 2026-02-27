@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from collections import deque
 from contextlib import asynccontextmanager
+from threading import Lock
 
+import psutil
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -19,11 +23,59 @@ PORT = int(os.environ.get("CE_PORT", "9810"))
 
 
 # ---------------------------------------------------------------------------
+# RateCounter — thread-safe sliding-window request counter
+# ---------------------------------------------------------------------------
+
+SPARKLINE_BUCKETS = 60
+
+
+class RateCounter:
+    """Count events in a sliding window and expose per-second rate + history."""
+
+    def __init__(self, window: float = 60.0) -> None:
+        self._window = window
+        self._lock = Lock()
+        self._timestamps: deque[float] = deque()
+        self._sparkline: deque[float] = deque(maxlen=SPARKLINE_BUCKETS)
+        self._last_snapshot = time.monotonic()
+
+    def record(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._timestamps.append(now)
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self._window
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+
+    def rate(self) -> float:
+        now = time.monotonic()
+        with self._lock:
+            self._prune(now)
+            count = len(self._timestamps)
+        return count / self._window if self._window else 0.0
+
+    def snapshot_sparkline(self) -> None:
+        self._sparkline.append(round(self.rate(), 2))
+
+    def sparkline_history(self) -> list[float]:
+        return list(self._sparkline)
+
+
+request_counter = RateCounter(window=60.0)
+_start_time: float = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _start_time
+    _start_time = time.time()
+
     await init_pool()
     logger.info("Database pool initialized")
 
@@ -63,6 +115,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Request counting middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def count_requests(request: Request, call_next):
+    request_counter.record()
+    return await call_next(request)
+
 
 # ---------------------------------------------------------------------------
 # Include adapter routers
@@ -107,15 +170,177 @@ async def health():
 async def metrics():
     """Stats endpoint for server-monitor dashboard."""
     try:
+        p = get_pool()
+        now = time.time()
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info()
+
+        request_counter.snapshot_sparkline()
+
+        # -- System metrics ---------------------------------------------------
+
+        uptime = now - _start_time if _start_time else 0.0
+        rps = request_counter.rate()
+
+        result: list[dict] = [
+            {
+                "key": "uptime",
+                "label": "Uptime",
+                "value": round(uptime),
+                "unit": "seconds",
+            },
+            {
+                "key": "rps",
+                "label": "Requests / sec",
+                "value": round(rps, 2),
+                "unit": "req/s",
+                "warn_above": 200,
+                "sparkline_history": request_counter.sparkline_history(),
+            },
+            {
+                "key": "memory_rss",
+                "label": "Memory (RSS)",
+                "value": round(mem.rss / 1_048_576, 1),
+                "unit": "MB",
+                "warn_above": 512,
+            },
+            {
+                "key": "memory_vms",
+                "label": "Memory (VMS)",
+                "value": round(mem.vms / 1_048_576, 1),
+                "unit": "MB",
+            },
+            {
+                "key": "cpu_percent",
+                "label": "CPU usage",
+                "value": process.cpu_percent(interval=0),
+                "unit": "%",
+                "warn_above": 90,
+            },
+        ]
+
+        # -- Content metrics --------------------------------------------------
+
         stats = await get_stats()
-        return {
-            "metrics": [
-                {"key": "total_decks", "label": "Total Decks", "value": stats["total_decks"], "unit": "count"},
-                {"key": "total_cards", "label": "Total Cards", "value": stats["total_cards"], "unit": "count"},
-                {"key": "total_sources", "label": "Source Providers", "value": stats["total_sources"], "unit": "count"},
-            ],
-            "decks_by_kind": stats["decks_by_kind"],
-        }
+
+        result.extend([
+            {"key": "total_decks", "label": "Total decks", "value": stats["total_decks"], "unit": "decks"},
+            {"key": "total_cards", "label": "Total cards", "value": stats["total_cards"], "unit": "cards"},
+            {"key": "total_sources", "label": "Source providers", "value": stats["total_sources"], "unit": "sources"},
+        ])
+
+        # Deck breakdown by kind
+        for kind, count in stats["decks_by_kind"].items():
+            result.append({
+                "key": f"decks_{kind}",
+                "label": f"Decks ({kind})",
+                "value": count,
+                "unit": "decks",
+            })
+
+        # Published vs draft
+        published = await p.fetchval(
+            "SELECT COUNT(*) FROM decks WHERE COALESCE(properties->>'status', 'published') = 'published'"
+        )
+        draft = await p.fetchval(
+            "SELECT COUNT(*) FROM decks WHERE properties->>'status' = 'draft'"
+        )
+        result.extend([
+            {"key": "decks_published", "label": "Published decks", "value": published, "unit": "decks"},
+            {"key": "decks_draft", "label": "Draft decks", "value": draft, "unit": "decks"},
+        ])
+
+        # -- Ingestion metrics ------------------------------------------------
+
+        daemon = app.state.daemon
+        daemon_state = daemon.state if daemon else "unknown"
+        daemon_stats = daemon.stats if daemon else {}
+
+        result.extend([
+            {"key": "ingest_state", "label": "Ingestion daemon", "value": daemon_state, "unit": ""},
+            {
+                "key": "ingest_cycles",
+                "label": "Ingestion cycles",
+                "value": daemon_stats.get("cycles_completed", 0),
+                "unit": "cycles",
+            },
+            {
+                "key": "ingest_added",
+                "label": "Cards ingested",
+                "value": daemon_stats.get("items_added", 0),
+                "unit": "cards",
+            },
+            {
+                "key": "ingest_dupes",
+                "label": "Duplicates skipped",
+                "value": daemon_stats.get("duplicates_skipped", 0),
+                "unit": "cards",
+            },
+            {
+                "key": "ingest_errors",
+                "label": "Ingestion errors",
+                "value": daemon_stats.get("errors", 0),
+                "unit": "errors",
+                "warn_above": 10,
+            },
+        ])
+
+        # Last source run
+        last_run = await p.fetchrow(
+            "SELECT finished_at, items_added, items_skipped, error "
+            "FROM source_runs ORDER BY started_at DESC LIMIT 1"
+        )
+        if last_run:
+            if last_run["error"]:
+                result.append({
+                    "key": "last_run_status",
+                    "label": "Last run",
+                    "value": "error",
+                    "unit": "",
+                    "color": "red",
+                })
+            elif last_run["finished_at"]:
+                result.append({
+                    "key": "last_run_added",
+                    "label": "Last run added",
+                    "value": last_run["items_added"],
+                    "unit": "cards",
+                })
+
+        # Total source runs
+        total_runs = await p.fetchval("SELECT COUNT(*) FROM source_runs")
+        result.append({
+            "key": "total_runs",
+            "label": "Total ingestion runs",
+            "value": total_runs,
+            "unit": "runs",
+        })
+
+        # -- Database health --------------------------------------------------
+
+        db_size = await p.fetchval(
+            "SELECT pg_database_size(current_database())"
+        )
+        result.append({
+            "key": "db_size",
+            "label": "Database size",
+            "value": round(db_size / 1_048_576, 1) if db_size else 0,
+            "unit": "MB",
+        })
+
+        active_conns = await p.fetchval(
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database()"
+        )
+        result.append({
+            "key": "db_connections",
+            "label": "DB connections",
+            "value": active_conns or 0,
+            "unit": "conns",
+            "warn_above": 50,
+        })
+
+        return {"metrics": result}
+
     except Exception as exc:
         logger.exception("Error fetching metrics")
         return JSONResponse(
