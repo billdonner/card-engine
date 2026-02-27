@@ -316,6 +316,39 @@ async def metrics():
             "unit": "runs",
         })
 
+        # -- Qross / Trivia metrics -------------------------------------------
+
+        trivia_categories = await p.fetchval(
+            "SELECT COUNT(*) FROM decks WHERE kind = 'trivia' "
+            "AND COALESCE(properties->>'status', 'published') = 'published'"
+        )
+        trivia_questions = await p.fetchval(
+            "SELECT COUNT(*) FROM cards c JOIN decks d ON d.id = c.deck_id "
+            "WHERE d.kind = 'trivia' "
+            "AND COALESCE(d.properties->>'status', 'published') = 'published'"
+        )
+        avg_per_cat = round(trivia_questions / trivia_categories, 1) if trivia_categories else 0
+        smallest_cat = await p.fetchrow(
+            "SELECT d.title, d.card_count FROM decks d "
+            "WHERE d.kind = 'trivia' "
+            "AND COALESCE(d.properties->>'status', 'published') = 'published' "
+            "ORDER BY d.card_count ASC LIMIT 1"
+        )
+
+        result.extend([
+            {"key": "trivia_categories", "label": "Trivia categories", "value": trivia_categories, "unit": "topics"},
+            {"key": "trivia_questions", "label": "Trivia questions", "value": trivia_questions, "unit": "questions"},
+            {"key": "trivia_avg_per_cat", "label": "Avg questions/topic", "value": avg_per_cat, "unit": "avg"},
+        ])
+        if smallest_cat:
+            result.append({
+                "key": "trivia_smallest",
+                "label": f"Smallest: {smallest_cat['title']}",
+                "value": smallest_cat["card_count"],
+                "unit": "questions",
+                "warn_below": 50,
+            })
+
         # -- Database health --------------------------------------------------
 
         db_size = await p.fetchval(
