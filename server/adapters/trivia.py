@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from server.db import get_all_decks_with_cards, get_categories_with_counts
 from server.models import (
@@ -20,9 +20,9 @@ router = APIRouter(prefix="/api/v1/trivia", tags=["trivia"])
 
 
 @router.get("/gamedata", response_model=GameDataOut)
-async def get_gamedata():
+async def get_gamedata(tier: str | None = Query(None, description="Filter by deck tier: free, family, premium")):
     """Bulk export all trivia content in alities Challenge format."""
-    rows = await get_all_decks_with_cards("trivia")
+    rows = await get_all_decks_with_cards("trivia", tier=tier)
 
     challenges: list[ChallengeOut] = []
     for r in rows:
@@ -63,9 +63,9 @@ async def get_gamedata():
 
 
 @router.get("/categories", response_model=CategoriesOut)
-async def get_categories():
+async def get_categories(tier: str | None = Query(None, description="Filter by deck tier: free, family, premium")):
     """List trivia categories with counts and SF Symbol pics."""
-    rows = await get_categories_with_counts()
+    rows = await get_categories_with_counts(tier=tier)
     categories = [
         CategoryOut(
             name=r["title"],

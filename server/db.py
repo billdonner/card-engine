@@ -73,6 +73,7 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 async def list_decks(
     kind: str | None = None,
     age: str | None = None,
+    tier: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[asyncpg.Record], int]:
@@ -89,6 +90,10 @@ async def list_decks(
     if age:
         conditions.append(f"properties->>'age_range' = ${idx}")
         params.append(age)
+        idx += 1
+    if tier:
+        conditions.append(f"tier = ${idx}::deck_tier")
+        params.append(tier)
         idx += 1
 
     where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -124,13 +129,13 @@ async def get_deck(deck_id: str) -> tuple[asyncpg.Record | None, list[asyncpg.Re
     return deck, cards
 
 
-async def get_all_decks_with_cards(kind: str) -> list[asyncpg.Record]:
+async def get_all_decks_with_cards(kind: str, tier: str | None = None) -> list[asyncpg.Record]:
     """Bulk-fetch all decks of a given kind with their cards via LEFT JOIN.
 
     Returns rows with both deck and card columns; caller groups by deck.
     """
     p = get_pool()
-    return await p.fetch(
+    sql = (
         "SELECT d.id AS deck_id, d.title, d.kind, d.properties AS deck_props, "
         "       d.card_count, d.created_at AS deck_created, "
         "       c.id AS card_id, c.position, c.question, "
@@ -140,20 +145,29 @@ async def get_all_decks_with_cards(kind: str) -> list[asyncpg.Record]:
         "LEFT JOIN cards c ON c.deck_id = d.id "
         "WHERE d.kind = $1::deck_kind "
         "  AND COALESCE(d.properties->>'status', 'published') = 'published' "
-        "ORDER BY d.created_at DESC, c.position",
-        kind,
     )
+    params: list = [kind]
+    if tier:
+        sql += "  AND d.tier = $2::deck_tier "
+        params.append(tier)
+    sql += "ORDER BY d.created_at DESC, c.position"
+    return await p.fetch(sql, *params)
 
 
-async def get_categories_with_counts() -> list[asyncpg.Record]:
+async def get_categories_with_counts(tier: str | None = None) -> list[asyncpg.Record]:
     """Get trivia categories (deck titles) with card counts and pic."""
     p = get_pool()
-    return await p.fetch(
+    sql = (
         "SELECT title, properties->>'pic' AS pic, card_count "
         "FROM decks WHERE kind = 'trivia' "
         "  AND COALESCE(properties->>'status', 'published') = 'published' "
-        "ORDER BY title"
     )
+    params: list = []
+    if tier:
+        sql += "  AND tier = $1::deck_tier "
+        params.append(tier)
+    sql += "ORDER BY title"
+    return await p.fetch(sql, *params)
 
 
 async def get_stats() -> dict:

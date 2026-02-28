@@ -402,8 +402,8 @@ async def generate_decks(
         }
 
         await pool.execute(
-            "INSERT INTO decks (id, title, kind, properties) "
-            "VALUES ($1, $2, $3::deck_kind, $4)",
+            "INSERT INTO decks (id, title, kind, properties, tier) "
+            "VALUES ($1, $2, $3::deck_kind, $4, 'family'::deck_tier)",
             deck_id, deck_title, kind, deck_props,
         )
         deck_ids.append(deck_id)

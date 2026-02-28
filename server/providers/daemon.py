@@ -255,8 +255,8 @@ class IngestionDaemon:
         new_id = uuid.uuid4()
         pic = symbol_for(category)
         await self._pool.execute(
-            "INSERT INTO decks (id, title, kind, properties) "
-            "VALUES ($1, $2, $3::deck_kind, $4)",
+            "INSERT INTO decks (id, title, kind, properties, tier) "
+            "VALUES ($1, $2, $3::deck_kind, $4, 'free'::deck_tier)",
             new_id, category, "trivia", {"pic": pic},
         )
         logger.info("Created trivia deck: %s (pic=%s)", category, pic)
