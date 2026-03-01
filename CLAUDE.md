@@ -133,6 +133,15 @@ Response fields map to obo-ios expectations: `topic`, `age_range`, `voice`, `ans
 
 Response fields map to alities-mobile expectations: `answers`, `correct`, `explanation`, `hint`, `pic`.
 
+#### Question Reports (Layer 2) — cross-app feedback
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/reports` | Submit a question report (any client app) |
+| GET | `/api/v1/reports` | List reports — optional `?app_id=` filter (admin) |
+
+Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_text": "...", "reason": "inaccurate", "topic": "...", "detail": "..." }`
+
 #### Ingestion Control (Layer 2) — daemon management
 
 | Method | Path | Description |
@@ -154,6 +163,7 @@ Response fields map to alities-mobile expectations: `answers`, `correct`, `expla
 | `server/adapters/generic.py` | `/api/v1/decks/*` routes |
 | `server/adapters/flashcards.py` | `/api/v1/flashcards/*` routes |
 | `server/adapters/trivia.py` | `/api/v1/trivia/*` routes |
+| `server/adapters/reports.py` | `/api/v1/reports` question feedback |
 | `server/providers/__init__.py` | Ingestion package init |
 | `server/providers/categories.py` | 40-alias → 20-canonical category map + SF Symbols |
 | `server/providers/dedup.py` | Signature + Jaccard dedup service |

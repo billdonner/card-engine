@@ -165,3 +165,28 @@ class SearchResultOut(BaseModel):
 class SearchOut(BaseModel):
     results: list[SearchResultOut]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Question reports / feedback
+# ---------------------------------------------------------------------------
+
+class QuestionReportIn(BaseModel):
+    app_id: str
+    challenge_id: str
+    topic: str | None = None
+    question_text: str
+    reason: str = "inaccurate"
+    detail: str | None = None
+
+
+class QuestionReportOut(BaseModel):
+    id: int
+    app_id: str
+    challenge_id: str
+    reported_at: datetime
+
+
+class ReportsListOut(BaseModel):
+    reports: list[QuestionReportOut]
+    total: int

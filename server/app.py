@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from server.db import close_pool, get_pool, get_stats, init_pool
+from server.db import close_pool, get_pool, get_report_count, get_stats, init_pool
 
 logger = logging.getLogger("card_engine")
 
@@ -135,6 +135,7 @@ from server.adapters.generic import router as generic_router  # noqa: E402
 from server.adapters.flashcards import router as flashcards_router  # noqa: E402
 from server.adapters.trivia import router as trivia_router  # noqa: E402
 from server.adapters.studio import router as studio_router  # noqa: E402
+from server.adapters.reports import router as reports_router  # noqa: E402
 from server.providers.routes import router as ingestion_router  # noqa: E402
 from server.family.routes import router as family_router  # noqa: E402
 
@@ -142,6 +143,7 @@ app.include_router(generic_router)
 app.include_router(flashcards_router)
 app.include_router(trivia_router)
 app.include_router(studio_router)
+app.include_router(reports_router)
 app.include_router(ingestion_router)
 app.include_router(family_router)
 
@@ -348,6 +350,16 @@ async def metrics():
                 "unit": "questions",
                 "warn_below": 50,
             })
+
+        # -- Question reports -------------------------------------------------
+
+        report_count = await get_report_count()
+        result.append({
+            "key": "question_reports",
+            "label": "Question reports",
+            "value": report_count,
+            "unit": "reports",
+        })
 
         # -- Database health --------------------------------------------------
 

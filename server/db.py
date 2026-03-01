@@ -326,6 +326,57 @@ async def reorder_cards(deck_id: str, card_ids: list[str]) -> list[asyncpg.Recor
     )
 
 
+async def insert_question_report(data: dict) -> asyncpg.Record:
+    """Insert a question report and return the new row."""
+    p = get_pool()
+    return await p.fetchrow(
+        "INSERT INTO question_reports (app_id, challenge_id, topic, question_text, reason, detail) "
+        "VALUES ($1, $2, $3, $4, $5, $6) "
+        "RETURNING id, app_id, challenge_id, reported_at",
+        data["app_id"],
+        data["challenge_id"],
+        data.get("topic"),
+        data["question_text"],
+        data.get("reason", "inaccurate"),
+        data.get("detail"),
+    )
+
+
+async def list_question_reports(
+    app_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[asyncpg.Record], int]:
+    """List question reports with optional app_id filter."""
+    p = get_pool()
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+
+    if app_id:
+        conditions.append(f"app_id = ${idx}")
+        params.append(app_id)
+        idx += 1
+
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    total = await p.fetchval(f"SELECT COUNT(*) FROM question_reports{where}", *params)
+
+    params.extend([limit, offset])
+    rows = await p.fetch(
+        f"SELECT id, app_id, challenge_id, reported_at "
+        f"FROM question_reports{where} ORDER BY reported_at DESC LIMIT ${idx} OFFSET ${idx + 1}",
+        *params,
+    )
+    return rows, total
+
+
+async def get_report_count() -> int:
+    """Total number of question reports."""
+    p = get_pool()
+    return await p.fetchval("SELECT COUNT(*) FROM question_reports")
+
+
 async def search_cards(query: str, limit: int = 20) -> tuple[list[asyncpg.Record], int]:
     """Full-text search across card questions. Returns (rows, total)."""
     p = get_pool()
