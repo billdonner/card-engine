@@ -170,3 +170,21 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 | `server/providers/openai_provider.py` | GPT-4o-mini trivia generator |
 | `server/providers/daemon.py` | Async background ingestion loop + DB writes |
 | `server/providers/routes.py` | `/api/v1/ingestion/*` control endpoints |
+
+## Planned Features
+
+### AI Difficulty Scoring
+
+Tester feedback: question difficulty is inconsistent. Currently, difficulty is set during generation but not validated.
+
+**Proposal:** Batch job that re-scores every question's difficulty using a small model (Claude Haiku):
+1. Feed each question + choices to Haiku with a rubric (subject obscurity, answer similarity, specialized knowledge required)
+2. Score as `easy` / `medium` / `hard`
+3. Store result as `ai_difficulty` in the card's JSONB properties (alongside existing `difficulty`)
+4. Expose `ai_difficulty` in `/api/v1/trivia/gamedata` response
+5. Qross and alities-mobile can filter/sort by `ai_difficulty` for consistent difficulty within levels
+
+Run as a one-time migration, then periodically on new questions (e.g., after each ingestion cycle).
+
+**Schema change:** Add `ai_difficulty` to card properties JSONB — no migration needed, just write the key.
+**API change:** Include `ai_difficulty` in trivia gamedata response alongside `difficulty`.
