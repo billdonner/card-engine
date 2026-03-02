@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -24,6 +25,9 @@ Rubric:
 
 Respond with ONLY one word: easy, medium, or hard."""
 
+MAX_RETRIES = 5
+BASE_DELAY = 1.0  # seconds
+
 
 async def score_question(
     client: httpx.AsyncClient,
@@ -32,7 +36,7 @@ async def score_question(
     choices: list[dict],
     correct_answer: str,
 ) -> str | None:
-    """Score a single question's difficulty using Claude Haiku."""
+    """Score a single question's difficulty using Claude Haiku with retry on 429."""
     choices_text = "\n".join(
         f"  {chr(65 + i)}) {c['text']}" for i, c in enumerate(choices)
     )
@@ -42,32 +46,58 @@ async def score_question(
         f"Correct answer: {correct_answer}"
     )
 
-    try:
-        response = await client.post(
-            ANTHROPIC_API_URL,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "max_tokens": 10,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": user_prompt}],
-            },
-            timeout=30.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-        text = data["content"][0]["text"].strip().lower()
-        if text in ("easy", "medium", "hard"):
-            return text
-        logger.warning("Unexpected difficulty response: %s", text)
-        return None
-    except Exception as e:
-        logger.error("Difficulty scoring error: %s", e)
-        return None
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = await client.post(
+                ANTHROPIC_API_URL,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": MODEL,
+                    "max_tokens": 10,
+                    "system": SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+                timeout=30.0,
+            )
+
+            if response.status_code == 429:
+                # Rate limited — exponential backoff with jitter
+                retry_after = response.headers.get("retry-after")
+                if retry_after:
+                    delay = float(retry_after)
+                else:
+                    delay = BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "Rate limited (attempt %d/%d), waiting %.1fs",
+                    attempt + 1, MAX_RETRIES, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+            text = data["content"][0]["text"].strip().lower()
+            if text in ("easy", "medium", "hard"):
+                return text
+            logger.warning("Unexpected difficulty response: %s", text)
+            return None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                delay = BASE_DELAY * (2 ** attempt)
+                await asyncio.sleep(delay)
+                continue
+            logger.error("Difficulty scoring error: %s", e)
+            return None
+        except Exception as e:
+            logger.error("Difficulty scoring error: %s", e)
+            return None
+
+    logger.error("Exhausted retries for question scoring")
+    return None
 
 
 class DifficultyScorer:
@@ -92,8 +122,8 @@ class DifficultyScorer:
         self,
         pool,
         api_key: str,
-        batch_size: int = 20,
-        concurrency: int = 5,
+        batch_size: int = 10,
+        concurrency: int = 2,
     ) -> None:
         if self.state == "running":
             return
@@ -131,13 +161,14 @@ class DifficultyScorer:
         try:
             async with httpx.AsyncClient() as client:
                 while self.state == "running":
-                    # Fetch unscored trivia cards
+                    # Fetch unscored trivia cards — only cards with dict properties
                     rows = await pool.fetch(
                         """
                         SELECT c.id, c.question, c.properties
                         FROM cards c
                         JOIN decks d ON c.deck_id = d.id
                         WHERE d.kind = 'trivia'
+                          AND jsonb_typeof(c.properties) = 'object'
                           AND (c.properties->>'ai_difficulty') IS NULL
                         LIMIT $1
                         """,
@@ -154,6 +185,7 @@ class DifficultyScorer:
                         FROM cards c
                         JOIN decks d ON c.deck_id = d.id
                         WHERE d.kind = 'trivia'
+                          AND jsonb_typeof(c.properties) = 'object'
                           AND (c.properties->>'ai_difficulty') IS NULL
                         """
                     )
@@ -166,8 +198,11 @@ class DifficultyScorer:
                             try:
                                 if self.state != "running":
                                     return
-                                raw_props = row["properties"]
-                                props = raw_props if isinstance(raw_props, dict) else {}
+                                props = row["properties"]
+                                if not isinstance(props, dict):
+                                    self.stats["total_errors"] += 1
+                                    return
+
                                 choices = props.get("choices", [])
                                 correct_idx = props.get("correct_index", 0)
 
@@ -190,10 +225,19 @@ class DifficultyScorer:
                                 )
 
                                 if difficulty:
+                                    # Use jsonb_set to safely update without || merge issues
                                     await pool.execute(
-                                        "UPDATE cards SET properties = properties || $2 WHERE id = $1",
+                                        """
+                                        UPDATE cards
+                                        SET properties = jsonb_set(
+                                            COALESCE(properties, '{}'::jsonb),
+                                            '{ai_difficulty}',
+                                            $2::jsonb
+                                        )
+                                        WHERE id = $1
+                                        """,
                                         row["id"],
-                                        {"ai_difficulty": difficulty},
+                                        json.dumps(difficulty),
                                     )
                                     self.stats["total_scored"] += 1
                                     self.stats["last_scored_at"] = datetime.now(
@@ -206,6 +250,10 @@ class DifficultyScorer:
                                 self.stats["total_errors"] += 1
 
                     await asyncio.gather(*(score_one(row) for row in rows))
+
+                    # Brief pause between batches to be kind to the API
+                    if self.state == "running":
+                        await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
             raise
