@@ -52,6 +52,7 @@ async def get_gamedata(tier: str | None = Query(None, description="Filter by dec
                 hint=props.get("hint", ""),
                 aisource=props.get("aisource", "card-engine"),
                 date=r["source_date"].isoformat() if r["source_date"] else "",
+                ai_difficulty=props.get("ai_difficulty"),
             )
         )
 

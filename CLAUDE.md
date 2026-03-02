@@ -153,6 +153,14 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 | POST | `/api/v1/ingestion/resume` | Resume from paused state |
 | GET | `/api/v1/ingestion/runs` | Recent source_run audit log |
 
+#### AI Difficulty Scoring (Layer 2) — batch scoring
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/difficulty/status` | Scorer state, stats, scored/unscored counts |
+| POST | `/api/v1/difficulty/start` | Start batch scoring job |
+| POST | `/api/v1/difficulty/stop` | Stop scoring job |
+
 ### Key Files
 
 | File | Purpose |
@@ -170,21 +178,43 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 | `server/providers/openai_provider.py` | GPT-4o-mini trivia generator |
 | `server/providers/daemon.py` | Async background ingestion loop + DB writes |
 | `server/providers/routes.py` | `/api/v1/ingestion/*` control endpoints |
+| `server/providers/difficulty.py` | Claude Haiku batch difficulty scorer |
+| `server/providers/difficulty_routes.py` | `/api/v1/difficulty/*` control endpoints |
 
-## Planned Features
+## AI Difficulty Scoring
 
-### AI Difficulty Scoring
+Batch job that scores every trivia question's difficulty using Claude Haiku (claude-haiku-4-5-20251001).
 
-Tester feedback: question difficulty is inconsistent. Currently, difficulty is set during generation but not validated.
+### How It Works
 
-**Proposal:** Batch job that re-scores every question's difficulty using a small model (Claude Haiku):
-1. Feed each question + choices to Haiku with a rubric (subject obscurity, answer similarity, specialized knowledge required)
-2. Score as `easy` / `medium` / `hard`
-3. Store result as `ai_difficulty` in the card's JSONB properties (alongside existing `difficulty`)
-4. Expose `ai_difficulty` in `/api/v1/trivia/gamedata` response
-5. Qross and alities-mobile can filter/sort by `ai_difficulty` for consistent difficulty within levels
+1. Fetches trivia cards without `ai_difficulty` in their JSONB properties
+2. Sends each question + choices to Claude Haiku with a rubric (subject obscurity, answer similarity, specialized knowledge)
+3. Haiku responds with a single word: `easy`, `medium`, or `hard`
+4. Stores result as `ai_difficulty` in the card's JSONB properties (no schema migration needed)
+5. Exposed in `/api/v1/trivia/gamedata` response as `ai_difficulty` field
+6. Qross and alities-mobile can use `ai_difficulty` for consistent difficulty badges and filtering
 
-Run as a one-time migration, then periodically on new questions (e.g., after each ingestion cycle).
+### Env Vars
 
-**Schema change:** Add `ai_difficulty` to card properties JSONB — no migration needed, just write the key.
-**API change:** Include `ai_difficulty` in trivia gamedata response alongside `difficulty`.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CE_ANTHROPIC_API_KEY` | (required) | Anthropic API key for Claude Haiku |
+| `CE_DIFFICULTY_BATCH_SIZE` | `20` | Cards per batch |
+| `CE_DIFFICULTY_CONCURRENCY` | `5` | Parallel Haiku requests per batch |
+
+### Usage
+
+```bash
+# Check status
+curl https://bd-cardzerver.fly.dev/api/v1/difficulty/status
+
+# Start scoring all unscored questions
+curl -X POST https://bd-cardzerver.fly.dev/api/v1/difficulty/start
+
+# Stop scoring
+curl -X POST https://bd-cardzerver.fly.dev/api/v1/difficulty/stop
+```
+
+### Cost Estimate
+
+~9k questions × ~105 tokens each ≈ 945k tokens. Claude Haiku pricing: ~$1 total.

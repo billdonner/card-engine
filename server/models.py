@@ -80,6 +80,7 @@ class ChallengeOut(BaseModel):
     hint: str
     aisource: str
     date: str
+    ai_difficulty: str | None = None
 
 
 class GameDataOut(BaseModel):
