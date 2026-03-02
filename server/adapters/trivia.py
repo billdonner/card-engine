@@ -29,8 +29,10 @@ async def get_gamedata(tier: str | None = Query(None, description="Filter by dec
         if r["card_id"] is None:
             continue
 
-        props = r["card_props"] or {}
-        deck_props = r["deck_props"] or {}
+        raw_props = r["card_props"]
+        props = raw_props if isinstance(raw_props, dict) else {}
+        raw_deck_props = r["deck_props"]
+        deck_props = raw_deck_props if isinstance(raw_deck_props, dict) else {}
         choices = props.get("choices", [])
         correct_idx = props.get("correct_index", 0)
 
