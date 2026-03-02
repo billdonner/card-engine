@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -181,9 +180,9 @@ class DifficultyScorer:
 
                             if difficulty:
                                 await pool.execute(
-                                    "UPDATE cards SET properties = properties || $2::jsonb WHERE id = $1",
+                                    "UPDATE cards SET properties = properties || $2 WHERE id = $1",
                                     row["id"],
-                                    json.dumps({"ai_difficulty": difficulty}),
+                                    {"ai_difficulty": difficulty},
                                 )
                                 self.stats["total_scored"] += 1
                                 self.stats["last_scored_at"] = datetime.now(
