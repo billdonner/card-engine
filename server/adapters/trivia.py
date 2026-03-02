@@ -20,9 +20,13 @@ router = APIRouter(prefix="/api/v1/trivia", tags=["trivia"])
 
 
 @router.get("/gamedata", response_model=GameDataOut)
-async def get_gamedata(tier: str | None = Query(None, description="Filter by deck tier: free, family, premium")):
+async def get_gamedata(
+    tier: str | None = Query(None, description="Filter by deck tier: free, family, premium"),
+    categories: str | None = Query(None, description="Comma-separated category names to include"),
+):
     """Bulk export all trivia content in alities Challenge format."""
-    rows = await get_all_decks_with_cards("trivia", tier=tier)
+    cat_list = [c.strip() for c in categories.split(",") if c.strip()] if categories else None
+    rows = await get_all_decks_with_cards("trivia", tier=tier, categories=cat_list)
 
     challenges: list[ChallengeOut] = []
     for r in rows:

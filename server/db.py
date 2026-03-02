@@ -129,7 +129,9 @@ async def get_deck(deck_id: str) -> tuple[asyncpg.Record | None, list[asyncpg.Re
     return deck, cards
 
 
-async def get_all_decks_with_cards(kind: str, tier: str | None = None) -> list[asyncpg.Record]:
+async def get_all_decks_with_cards(
+    kind: str, tier: str | None = None, categories: list[str] | None = None
+) -> list[asyncpg.Record]:
     """Bulk-fetch all decks of a given kind with their cards via LEFT JOIN.
 
     Returns rows with both deck and card columns; caller groups by deck.
@@ -147,9 +149,15 @@ async def get_all_decks_with_cards(kind: str, tier: str | None = None) -> list[a
         "  AND COALESCE(d.properties->>'status', 'published') = 'published' "
     )
     params: list = [kind]
+    idx = 2
     if tier:
-        sql += "  AND d.tier = $2::deck_tier "
+        sql += f"  AND d.tier = ${idx}::deck_tier "
         params.append(tier)
+        idx += 1
+    if categories:
+        sql += f"  AND d.title = ANY(${idx}::text[]) "
+        params.append(categories)
+        idx += 1
     sql += "ORDER BY d.created_at DESC, c.position"
     return await p.fetch(sql, *params)
 
