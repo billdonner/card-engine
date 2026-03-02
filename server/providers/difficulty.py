@@ -1,4 +1,4 @@
-"""AI difficulty scoring for trivia questions using Claude Haiku."""
+"""AI difficulty scoring for trivia questions using GPT-4o-mini."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-haiku-4-5-20251001"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+MODEL = "gpt-4o-mini"
 
 SYSTEM_PROMPT = """\
 You are a trivia question difficulty scorer. Rate each question as 'easy', 'medium', or 'hard'.
@@ -36,7 +36,7 @@ async def score_question(
     choices: list[dict],
     correct_answer: str,
 ) -> str | None:
-    """Score a single question's difficulty using Claude Haiku with retry on 429."""
+    """Score a single question's difficulty using GPT-4o-mini with retry on 429."""
     choices_text = "\n".join(
         f"  {chr(65 + i)}) {c['text']}" for i, c in enumerate(choices)
     )
@@ -49,28 +49,24 @@ async def score_question(
     for attempt in range(MAX_RETRIES):
         try:
             response = await client.post(
-                ANTHROPIC_API_URL,
+                OPENAI_API_URL,
                 headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
                 },
                 json={
                     "model": MODEL,
                     "max_tokens": 10,
-                    "system": SYSTEM_PROMPT,
-                    "messages": [{"role": "user", "content": user_prompt}],
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
                 },
                 timeout=30.0,
             )
 
             if response.status_code == 429:
-                # Rate limited — exponential backoff with jitter
-                retry_after = response.headers.get("retry-after")
-                if retry_after:
-                    delay = float(retry_after)
-                else:
-                    delay = BASE_DELAY * (2 ** attempt)
+                delay = BASE_DELAY * (2 ** attempt)
                 logger.warning(
                     "Rate limited (attempt %d/%d), waiting %.1fs",
                     attempt + 1, MAX_RETRIES, delay,
@@ -80,7 +76,7 @@ async def score_question(
 
             response.raise_for_status()
             data = response.json()
-            text = data["content"][0]["text"].strip().lower()
+            text = data["choices"][0]["message"]["content"].strip().lower()
             if text in ("easy", "medium", "hard"):
                 return text
             logger.warning("Unexpected difficulty response: %s", text)
@@ -122,8 +118,8 @@ class DifficultyScorer:
         self,
         pool,
         api_key: str,
-        batch_size: int = 10,
-        concurrency: int = 2,
+        batch_size: int = 20,
+        concurrency: int = 10,
     ) -> None:
         if self.state == "running":
             return
@@ -225,7 +221,6 @@ class DifficultyScorer:
                                 )
 
                                 if difficulty:
-                                    # Use jsonb_set to safely update without || merge issues
                                     await pool.execute(
                                         """
                                         UPDATE cards
@@ -250,10 +245,6 @@ class DifficultyScorer:
                                 self.stats["total_errors"] += 1
 
                     await asyncio.gather(*(score_one(row) for row in rows))
-
-                    # Brief pause between batches to be kind to the API
-                    if self.state == "running":
-                        await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
             raise

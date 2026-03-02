@@ -40,12 +40,12 @@ async def difficulty_status():
 @router.post("/start")
 async def start_scoring():
     """Start the batch difficulty scoring job."""
-    api_key = os.environ.get("CE_ANTHROPIC_API_KEY")
+    api_key = os.environ.get("CE_OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="CE_ANTHROPIC_API_KEY not set")
+        raise HTTPException(status_code=500, detail="CE_OPENAI_API_KEY not set")
 
     batch_size = int(os.environ.get("CE_DIFFICULTY_BATCH_SIZE", "20"))
-    concurrency = int(os.environ.get("CE_DIFFICULTY_CONCURRENCY", "5"))
+    concurrency = int(os.environ.get("CE_DIFFICULTY_CONCURRENCY", "10"))
 
     pool = get_pool()
     await scorer.start(pool, api_key, batch_size, concurrency)
