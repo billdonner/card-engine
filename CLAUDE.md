@@ -183,14 +183,14 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 
 ## AI Difficulty Scoring
 
-Batch job that scores every trivia question's difficulty using Claude Haiku (claude-haiku-4-5-20251001).
+Batch job that scores every trivia question's difficulty using GPT-4o-mini.
 
 ### How It Works
 
-1. Fetches trivia cards without `ai_difficulty` in their JSONB properties
-2. Sends each question + choices to Claude Haiku with a rubric (subject obscurity, answer similarity, specialized knowledge)
-3. Haiku responds with a single word: `easy`, `medium`, or `hard`
-4. Stores result as `ai_difficulty` in the card's JSONB properties (no schema migration needed)
+1. Fetches trivia cards without `ai_difficulty` in their JSONB properties (only dict-type properties)
+2. Sends each question + choices to GPT-4o-mini with a rubric (subject obscurity, answer similarity, specialized knowledge)
+3. Model responds with a single word: `easy`, `medium`, or `hard`
+4. Stores result via `jsonb_set()` as `ai_difficulty` in the card's JSONB properties (no schema migration needed)
 5. Exposed in `/api/v1/trivia/gamedata` response as `ai_difficulty` field
 6. Qross and alities-mobile can use `ai_difficulty` for consistent difficulty badges and filtering
 
@@ -198,9 +198,9 @@ Batch job that scores every trivia question's difficulty using Claude Haiku (cla
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CE_ANTHROPIC_API_KEY` | (required) | Anthropic API key for Claude Haiku |
+| `CE_OPENAI_API_KEY` | (required) | OpenAI API key (reuses ingestion key) |
 | `CE_DIFFICULTY_BATCH_SIZE` | `20` | Cards per batch |
-| `CE_DIFFICULTY_CONCURRENCY` | `5` | Parallel Haiku requests per batch |
+| `CE_DIFFICULTY_CONCURRENCY` | `10` | Parallel requests per batch |
 
 ### Usage
 
@@ -217,4 +217,4 @@ curl -X POST https://bd-cardzerver.fly.dev/api/v1/difficulty/stop
 
 ### Cost Estimate
 
-~9k questions × ~105 tokens each ≈ 945k tokens. Claude Haiku pricing: ~$1 total.
+~9k questions × ~105 tokens each ≈ 945k tokens. GPT-4o-mini: ~$0.15 total.
