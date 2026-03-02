@@ -163,32 +163,46 @@ class DifficultyScorer:
 
                     async def score_one(row) -> None:
                         async with sem:
-                            if self.state != "running":
-                                return
-                            props = row["properties"] or {}
-                            choices = props.get("choices", [])
-                            correct_idx = props.get("correct_index", 0)
-                            correct_answer = (
-                                choices[correct_idx]["text"]
-                                if choices and correct_idx < len(choices)
-                                else ""
-                            )
+                            try:
+                                if self.state != "running":
+                                    return
+                                raw_props = row["properties"]
+                                props = raw_props if isinstance(raw_props, dict) else {}
+                                choices = props.get("choices", [])
+                                correct_idx = props.get("correct_index", 0)
 
-                            difficulty = await score_question(
-                                client, api_key, row["question"], choices, correct_answer
-                            )
+                                # Normalize choices — may be dicts or strings
+                                norm_choices = []
+                                for c in choices:
+                                    if isinstance(c, dict):
+                                        norm_choices.append(c)
+                                    else:
+                                        norm_choices.append({"text": str(c), "isCorrect": False})
 
-                            if difficulty:
-                                await pool.execute(
-                                    "UPDATE cards SET properties = properties || $2 WHERE id = $1",
-                                    row["id"],
-                                    {"ai_difficulty": difficulty},
+                                correct_answer = (
+                                    norm_choices[correct_idx]["text"]
+                                    if norm_choices and correct_idx < len(norm_choices)
+                                    else ""
                                 )
-                                self.stats["total_scored"] += 1
-                                self.stats["last_scored_at"] = datetime.now(
-                                    timezone.utc
-                                ).isoformat()
-                            else:
+
+                                difficulty = await score_question(
+                                    client, api_key, row["question"], norm_choices, correct_answer
+                                )
+
+                                if difficulty:
+                                    await pool.execute(
+                                        "UPDATE cards SET properties = properties || $2 WHERE id = $1",
+                                        row["id"],
+                                        {"ai_difficulty": difficulty},
+                                    )
+                                    self.stats["total_scored"] += 1
+                                    self.stats["last_scored_at"] = datetime.now(
+                                        timezone.utc
+                                    ).isoformat()
+                                else:
+                                    self.stats["total_errors"] += 1
+                            except Exception as e:
+                                logger.error("Error scoring card %s: %s", row["id"], e)
                                 self.stats["total_errors"] += 1
 
                     await asyncio.gather(*(score_one(row) for row in rows))
