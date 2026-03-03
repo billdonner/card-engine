@@ -15,7 +15,16 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from server.db import close_pool, get_pool, get_report_count, get_stats, init_pool
+from server.db import (
+    close_pool,
+    get_card_view_count,
+    get_player_count,
+    get_pool,
+    get_report_count,
+    get_session_count,
+    get_stats,
+    init_pool,
+)
 
 logger = logging.getLogger("card_engine")
 
@@ -139,6 +148,7 @@ from server.adapters.reports import router as reports_router  # noqa: E402
 from server.providers.routes import router as ingestion_router  # noqa: E402
 from server.providers.difficulty_routes import router as difficulty_router  # noqa: E402
 from server.family.routes import router as family_router  # noqa: E402
+from server.adapters.players import router as players_router  # noqa: E402
 
 app.include_router(generic_router)
 app.include_router(flashcards_router)
@@ -148,6 +158,7 @@ app.include_router(reports_router)
 app.include_router(ingestion_router)
 app.include_router(difficulty_router)
 app.include_router(family_router)
+app.include_router(players_router)
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +373,18 @@ async def metrics():
             "value": report_count,
             "unit": "reports",
         })
+
+        # -- Player & session metrics -----------------------------------------
+
+        total_players = await get_player_count()
+        total_sessions = await get_session_count()
+        total_card_views = await get_card_view_count()
+
+        result.extend([
+            {"key": "total_players", "label": "Players", "value": total_players, "unit": "players"},
+            {"key": "total_sessions", "label": "Sessions", "value": total_sessions, "unit": "sessions"},
+            {"key": "total_card_views", "label": "Card views", "value": total_card_views, "unit": "views"},
+        ])
 
         # -- Database health --------------------------------------------------
 

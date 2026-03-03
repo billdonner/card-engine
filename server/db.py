@@ -385,6 +385,203 @@ async def get_report_count() -> int:
     return await p.fetchval("SELECT COUNT(*) FROM question_reports")
 
 
+# ---------------------------------------------------------------------------
+# Player & session helpers
+# ---------------------------------------------------------------------------
+
+import random
+import string
+
+
+async def upsert_player(device_id: str, display_name: str | None = None, properties: dict | None = None) -> tuple[asyncpg.Record, bool]:
+    """Insert or update a player by device_id. Returns (row, is_new)."""
+    p = get_pool()
+    props = properties or {}
+    # Try insert first
+    existing = await p.fetchrow("SELECT id FROM players WHERE device_id = $1", device_id)
+    if existing:
+        row = await p.fetchrow(
+            "UPDATE players SET last_seen_at = now(), "
+            "display_name = COALESCE($2, display_name) "
+            "WHERE device_id = $1 "
+            "RETURNING id, device_id, display_name, created_at, last_seen_at",
+            device_id, display_name,
+        )
+        return row, False
+    else:
+        player_id = uuid.uuid4()
+        row = await p.fetchrow(
+            "INSERT INTO players (id, device_id, display_name, properties) "
+            "VALUES ($1, $2, $3, $4) "
+            "RETURNING id, device_id, display_name, created_at, last_seen_at",
+            player_id, device_id, display_name, props,
+        )
+        return row, True
+
+
+async def get_player(player_id: uuid.UUID) -> asyncpg.Record | None:
+    """Get a player by UUID."""
+    p = get_pool()
+    return await p.fetchrow(
+        "SELECT id, device_id, display_name, created_at, last_seen_at "
+        "FROM players WHERE id = $1",
+        player_id,
+    )
+
+
+async def get_player_seen_card_ids(player_id: uuid.UUID, app_id: str = "qross") -> set[uuid.UUID]:
+    """Return the set of card UUIDs this player has already been served."""
+    p = get_pool()
+    rows = await p.fetch(
+        "SELECT card_id FROM player_card_history WHERE player_id = $1 AND app_id = $2",
+        player_id, app_id,
+    )
+    return {r["card_id"] for r in rows}
+
+
+async def record_seen_cards(player_id: uuid.UUID, card_ids: list[uuid.UUID], app_id: str = "qross") -> None:
+    """Record that a player has been served these cards (ON CONFLICT ignore)."""
+    if not card_ids:
+        return
+    p = get_pool()
+    async with p.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO player_card_history (player_id, card_id, app_id) "
+            "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            [(player_id, cid, app_id) for cid in card_ids],
+        )
+
+
+async def clear_player_history(player_id: uuid.UUID, app_id: str | None = None) -> int:
+    """Clear a player's seen-card history. Returns count deleted."""
+    p = get_pool()
+    if app_id:
+        result = await p.execute(
+            "DELETE FROM player_card_history WHERE player_id = $1 AND app_id = $2",
+            player_id, app_id,
+        )
+    else:
+        result = await p.execute(
+            "DELETE FROM player_card_history WHERE player_id = $1",
+            player_id,
+        )
+    # result is like "DELETE 50"
+    return int(result.split()[-1])
+
+
+async def get_player_stats(player_id: uuid.UUID, app_id: str = "qross") -> dict:
+    """Get seen-card stats for a player: total + per-category breakdown."""
+    p = get_pool()
+    total = await p.fetchval(
+        "SELECT COUNT(*) FROM player_card_history WHERE player_id = $1 AND app_id = $2",
+        player_id, app_id,
+    )
+    rows = await p.fetch(
+        "SELECT d.title AS category, COUNT(*) AS cnt "
+        "FROM player_card_history pch "
+        "JOIN cards c ON c.id = pch.card_id "
+        "JOIN decks d ON d.id = c.deck_id "
+        "WHERE pch.player_id = $1 AND pch.app_id = $2 "
+        "GROUP BY d.title ORDER BY d.title",
+        player_id, app_id,
+    )
+    return {
+        "total_seen": total,
+        "by_category": {r["category"]: r["cnt"] for r in rows},
+    }
+
+
+def _generate_share_code(length: int = 6) -> str:
+    """Generate a random uppercase alphanumeric share code."""
+    chars = string.ascii_uppercase + string.digits
+    return "".join(random.choices(chars, k=length))
+
+
+async def create_session(
+    player_id: uuid.UUID,
+    card_ids: list[uuid.UUID],
+    app_id: str = "qross",
+    properties: dict | None = None,
+) -> tuple[uuid.UUID, str]:
+    """Create a session with a unique share code and ordered card list.
+    Returns (session_id, share_code).
+    """
+    p = get_pool()
+    session_id = uuid.uuid4()
+    props = properties or {}
+
+    # Retry loop for share code collisions
+    for _ in range(10):
+        share_code = _generate_share_code()
+        try:
+            async with p.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO sessions (id, player_id, share_code, app_id, properties) "
+                        "VALUES ($1, $2, $3, $4, $5)",
+                        session_id, player_id, share_code, app_id, props,
+                    )
+                    if card_ids:
+                        await conn.executemany(
+                            "INSERT INTO session_cards (session_id, card_id, position) "
+                            "VALUES ($1, $2, $3)",
+                            [(session_id, cid, pos) for pos, cid in enumerate(card_ids)],
+                        )
+            return session_id, share_code
+        except asyncpg.UniqueViolationError:
+            # Share code collision — retry with new code
+            session_id = uuid.uuid4()
+            continue
+    raise RuntimeError("Failed to generate unique share code after 10 attempts")
+
+
+async def get_session_by_share_code(share_code: str) -> tuple[asyncpg.Record | None, list[asyncpg.Record]]:
+    """Look up a session by share code. Returns (session_row, card_rows).
+    Card rows include full card + deck info for building challenges.
+    """
+    p = get_pool()
+    session = await p.fetchrow(
+        "SELECT id, player_id, share_code, app_id, created_at FROM sessions WHERE share_code = $1",
+        share_code.upper(),
+    )
+    if session is None:
+        return None, []
+
+    rows = await p.fetch(
+        "SELECT sc.position, "
+        "       d.id AS deck_id, d.title, d.kind, d.properties AS deck_props, "
+        "       d.card_count, d.created_at AS deck_created, "
+        "       c.id AS card_id, c.position AS card_position, c.question, "
+        "       c.properties AS card_props, c.difficulty, "
+        "       c.source_url, c.source_date "
+        "FROM session_cards sc "
+        "JOIN cards c ON c.id = sc.card_id "
+        "JOIN decks d ON d.id = c.deck_id "
+        "WHERE sc.session_id = $1 "
+        "ORDER BY sc.position",
+        session["id"],
+    )
+    return session, rows
+
+
+async def get_player_count() -> int:
+    """Total number of registered players."""
+    p = get_pool()
+    return await p.fetchval("SELECT COUNT(*) FROM players")
+
+
+async def get_session_count() -> int:
+    """Total number of sessions."""
+    p = get_pool()
+    return await p.fetchval("SELECT COUNT(*) FROM sessions")
+
+
+async def get_card_view_count() -> int:
+    """Total number of card views (player_card_history rows)."""
+    p = get_pool()
+    return await p.fetchval("SELECT COUNT(*) FROM player_card_history")
+
+
 async def search_cards(query: str, limit: int = 20) -> tuple[list[asyncpg.Record], int]:
     """Full-text search across card questions. Returns (rows, total)."""
     p = get_pool()

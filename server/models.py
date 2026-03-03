@@ -191,3 +191,33 @@ class QuestionReportOut(BaseModel):
 class ReportsListOut(BaseModel):
     reports: list[QuestionReportOut]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Players & sessions
+# ---------------------------------------------------------------------------
+
+class PlayerIn(BaseModel):
+    device_id: str
+    display_name: str | None = None
+    properties: dict = {}
+
+
+class PlayerOut(BaseModel):
+    id: UUID
+    device_id: str
+    display_name: str | None = None
+    created_at: datetime
+    last_seen_at: datetime
+    is_new: bool
+
+
+class PlayerStatsOut(BaseModel):
+    player_id: UUID
+    total_seen: int
+    by_category: dict[str, int]
+
+
+class ResetOut(BaseModel):
+    player_id: UUID
+    cleared: int

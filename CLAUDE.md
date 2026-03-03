@@ -50,6 +50,10 @@ PostgreSQL with the unified schema in `schema/001_initial.sql`.
 - `cards` — content items with JSONB properties
 - `source_providers` — tracks ingestion sources
 - `source_runs` — audit log for pipeline runs
+- `players` — anonymous device-based player identity (schema 008)
+- `player_card_history` — tracks which cards each player has been served (schema 008)
+- `sessions` — dealt hand of cards with shareable 6-char code (schema 008)
+- `session_cards` — ordered card list within a session (schema 008)
 
 ## Related Repos
 
@@ -133,6 +137,17 @@ Response fields map to obo-ios expectations: `topic`, `age_range`, `voice`, `ans
 
 Response fields map to alities-mobile expectations: `answers`, `correct`, `explanation`, `hint`, `pic`.
 
+When `player_id` query param is provided to `/api/v1/trivia/gamedata`, response adds `session_id`, `share_code`, `fresh_count`, `total_available`. Previously seen cards are excluded.
+
+#### Players & Sessions (Layer 2) — device identity and session sharing
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/players` | Register/upsert player by `device_id` |
+| GET | `/api/v1/players/{id}/stats` | Seen count, per-category breakdown |
+| POST | `/api/v1/players/{id}/reset` | Clear seen-card history |
+| GET | `/api/v1/sessions/{share_code}` | Replay a shared session (same `GameDataOut` shape) |
+
 #### Question Reports (Layer 2) — cross-app feedback
 
 | Method | Path | Description |
@@ -170,7 +185,8 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 | `server/models.py` | All Pydantic request/response models |
 | `server/adapters/generic.py` | `/api/v1/decks/*` routes |
 | `server/adapters/flashcards.py` | `/api/v1/flashcards/*` routes |
-| `server/adapters/trivia.py` | `/api/v1/trivia/*` routes |
+| `server/adapters/trivia.py` | `/api/v1/trivia/*` routes (with player-aware exclusion) |
+| `server/adapters/players.py` | `/api/v1/players/*` + `/api/v1/sessions/*` routes |
 | `server/adapters/reports.py` | `/api/v1/reports` question feedback |
 | `server/providers/__init__.py` | Ingestion package init |
 | `server/providers/categories.py` | 40-alias → 20-canonical category map + SF Symbols |
