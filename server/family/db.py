@@ -366,3 +366,47 @@ async def delete_family_invite(invite_id: str) -> bool:
     p = get_pool()
     result = await p.execute("DELETE FROM family_invites WHERE id = $1", invite_id)
     return result == "DELETE 1"
+
+
+# ---------------------------------------------------------------------------
+# Deck card browsing + exclusions
+# ---------------------------------------------------------------------------
+
+async def get_deck_cards(deck_id: str) -> list[asyncpg.Record]:
+    p = get_pool()
+    return await p.fetch(
+        "SELECT id, deck_id, position, question, properties, difficulty, created_at "
+        "FROM cards WHERE deck_id = $1 ORDER BY position",
+        deck_id,
+    )
+
+
+async def add_exclusion(family_id: str, question: str) -> asyncpg.Record:
+    p = get_pool()
+    eid = uuid.uuid4()
+    return await p.fetchrow(
+        "INSERT INTO family_card_exclusions (id, family_id, question) VALUES ($1, $2, $3) "
+        "ON CONFLICT (family_id, question) DO UPDATE SET excluded_at = now() "
+        "RETURNING id, family_id, question, excluded_at",
+        eid, family_id, question,
+    )
+
+
+async def remove_exclusion(exclusion_id: str) -> bool:
+    p = get_pool()
+    result = await p.execute("DELETE FROM family_card_exclusions WHERE id = $1", exclusion_id)
+    return result == "DELETE 1"
+
+
+async def list_exclusions(family_id: str) -> list[asyncpg.Record]:
+    p = get_pool()
+    return await p.fetch(
+        "SELECT id, family_id, question, excluded_at FROM family_card_exclusions "
+        "WHERE family_id = $1 ORDER BY excluded_at DESC",
+        family_id,
+    )
+
+
+async def get_excluded_questions(family_id: str) -> set[str]:
+    rows = await list_exclusions(family_id)
+    return {r["question"] for r in rows}

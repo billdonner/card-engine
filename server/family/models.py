@@ -170,3 +170,23 @@ class FamilyInviteOut(BaseModel):
 class JoinFamilyIn(BaseModel):
     player_id: UUID
     invite_code: str
+
+
+# ---------------------------------------------------------------------------
+# Deck editing models
+# ---------------------------------------------------------------------------
+
+class FamilyCardOut(BaseModel):
+    id: UUID
+    deck_id: UUID
+    position: int
+    question: str
+    properties: dict
+    difficulty: str
+    created_at: datetime
+
+
+class FamilyExclusionOut(BaseModel):
+    id: UUID
+    question: str
+    excluded_at: datetime

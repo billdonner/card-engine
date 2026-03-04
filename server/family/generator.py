@@ -14,6 +14,7 @@ from collections import defaultdict
 import asyncpg
 
 from server.family.engine import FamilyGraph, NamedRelation, Person, Relationship
+from server.family.db import get_excluded_questions
 
 logger = logging.getLogger("card_engine.family.generator")
 
@@ -385,6 +386,9 @@ async def generate_decks(
     player_person = next((p for p in engine_people if p.id == player_id), None)
     player_name = player_person.name if player_person else "you"
 
+    # Load questions this family has excluded so they are skipped on regeneration
+    excluded = await get_excluded_questions(family_id)
+
     deck_ids: list[uuid.UUID] = []
     total_cards = 0
 
@@ -413,6 +417,8 @@ async def generate_decks(
         if kind == "flashcard":
             for rel in relations:
                 for question, answer, diff in _flashcard_templates(rel, relations, player_name):
+                    if question in excluded:
+                        continue
                     card_id = uuid.uuid4()
                     await pool.execute(
                         "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "
@@ -426,6 +432,8 @@ async def generate_decks(
 
             # Bonus group/counting/connection cards
             for question, answer, diff in _bonus_flashcards(relations, player_name):
+                if question in excluded:
+                    continue
                 card_id = uuid.uuid4()
                 await pool.execute(
                     "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "
@@ -440,6 +448,8 @@ async def generate_decks(
         elif kind == "trivia":
             for rel in relations:
                 for card_data in _trivia_templates(rel, relations, player_name):
+                    if card_data["question"] in excluded:
+                        continue
                     card_id = uuid.uuid4()
                     await pool.execute(
                         "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "

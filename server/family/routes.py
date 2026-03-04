@@ -16,6 +16,8 @@ from server.family.models import (
     CreateFamilyIn,
     CreatePersonIn,
     CreateRelationshipIn,
+    FamilyCardOut,
+    FamilyExclusionOut,
     FamilyInviteOut,
     FamilyMemberOut,
     FamilyOut,
@@ -585,6 +587,101 @@ async def _apply_patch(family_id: str, patch: dict) -> bool:
     else:
         logger.warning("Unknown patch op: %s", op)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Family deck editing + exclusions
+# ---------------------------------------------------------------------------
+
+@router.get("/{family_id}/decks/{deck_id}")
+async def get_family_deck_cards(
+    family_id: UUID,
+    deck_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> list[FamilyCardOut]:
+    """List all cards in a family-generated deck."""
+    pool = get_pool()
+    # Verify deck belongs to this family
+    row = await pool.fetchrow(
+        "SELECT id FROM decks WHERE id = $1 AND properties->>'family_id' = $2",
+        str(deck_id), str(family_id),
+    )
+    if row is None:
+        raise HTTPException(404, "Deck not found in this family")
+    cards = await fdb.get_deck_cards(str(deck_id))
+    return [
+        FamilyCardOut(
+            id=c["id"],
+            deck_id=c["deck_id"],
+            position=c["position"],
+            question=c["question"],
+            properties=dict(c["properties"]),
+            difficulty=str(c["difficulty"]),
+            created_at=c["created_at"],
+        )
+        for c in cards
+    ]
+
+
+@router.delete("/{family_id}/decks/{deck_id}/cards/{card_id}")
+async def remove_family_card(
+    family_id: UUID,
+    deck_id: UUID,
+    card_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> dict:
+    """Remove a card from a family deck and add it to the exclusion list."""
+    pool = get_pool()
+    # Verify deck belongs to this family
+    deck_row = await pool.fetchrow(
+        "SELECT id FROM decks WHERE id = $1 AND properties->>'family_id' = $2",
+        str(deck_id), str(family_id),
+    )
+    if deck_row is None:
+        raise HTTPException(404, "Deck not found in this family")
+    # Get the card's question before deleting
+    card_row = await pool.fetchrow(
+        "SELECT question FROM cards WHERE id = $1 AND deck_id = $2",
+        str(card_id), str(deck_id),
+    )
+    if card_row is None:
+        raise HTTPException(404, "Card not found")
+    question = card_row["question"]
+    # Add to exclusions so regeneration skips it
+    await fdb.add_exclusion(str(family_id), question)
+    # Delete the card
+    await pool.execute("DELETE FROM cards WHERE id = $1", str(card_id))
+    return {"removed": True, "question": question}
+
+
+@router.get("/{family_id}/exclusions")
+async def list_exclusions(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> list[FamilyExclusionOut]:
+    """List questions excluded from this family's decks."""
+    rows = await fdb.list_exclusions(str(family_id))
+    return [
+        FamilyExclusionOut(
+            id=r["id"],
+            question=r["question"],
+            excluded_at=r["excluded_at"],
+        )
+        for r in rows
+    ]
+
+
+@router.delete("/{family_id}/exclusions/{exclusion_id}")
+async def restore_exclusion(
+    family_id: UUID,
+    exclusion_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> dict:
+    """Restore an excluded question (remove it from the exclusion list)."""
+    removed = await fdb.remove_exclusion(str(exclusion_id))
+    if not removed:
+        raise HTTPException(404, "Exclusion not found")
+    return {"restored": True}
 
 
 # ---------------------------------------------------------------------------
