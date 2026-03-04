@@ -44,16 +44,28 @@ Trivia question generation daemon ported from alities-engine. Runs as an async b
 
 ## Database
 
-PostgreSQL with the unified schema in `schema/001_initial.sql`.
+PostgreSQL — incremental migrations in `schema/`.
 
+### Content tables (001)
 - `decks` — content collections (kind: flashcard, trivia, newsquiz)
 - `cards` — content items with JSONB properties
 - `source_providers` — tracks ingestion sources
 - `source_runs` — audit log for pipeline runs
-- `players` — anonymous device-based player identity (schema 008)
-- `player_card_history` — tracks which cards each player has been served (schema 008)
-- `sessions` — dealt hand of cards with shareable 6-char code (schema 008)
-- `session_cards` — ordered card list within a session (schema 008)
+
+### Player & session tables (008)
+- `players` — anonymous device-based identity (`device_id TEXT UNIQUE`)
+- `player_card_history` — tracks which cards each player has been served
+- `sessions` — dealt hand of cards with shareable 6-char code
+- `session_cards` — ordered card list within a session
+
+### Family tree tables (005, 009, 010)
+- `families` — top-level family record
+- `family_people` — people in the tree (name, born, gender, status, player flag)
+- `family_relationships` — typed edges: `married`, `parent_of`, `divorced`
+- `family_chat_sessions` — JSONB chat history per family (LLM builder)
+- `family_members` — links `players` → `families` with role (`owner`/`member`) (009)
+- `family_invites` — 6-char invite codes for joining a family (009)
+- `family_card_exclusions` — questions a family has removed from generated decks (010)
 
 ## Related Repos
 
@@ -181,6 +193,82 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 | GET | `/api/v1/difficulty/status` | Scorer state, stats, scored/unscored counts |
 | POST | `/api/v1/difficulty/start` | Start batch scoring job |
 | POST | `/api/v1/difficulty/stop` | Stop scoring job |
+
+#### Family Tree (Layer 2) — device-based access control
+
+All family endpoints require `?player_id=<uuid>` (device identity). Families are private — only members see and edit them.
+
+**Family CRUD**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| POST | `/api/v1/family` | open | Create family; body `{name, player_id}` — creator becomes owner |
+| GET | `/api/v1/family` | open | List families `?player_id=` — returns only player's families |
+| GET | `/api/v1/family/{id}` | member | Full tree (people + relationships) |
+| DELETE | `/api/v1/family/{id}` | owner | Delete family and all data |
+
+**People & Relationships**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| POST | `/api/v1/family/{id}/people` | member | Add person |
+| PATCH | `/api/v1/family/{id}/people/{pid}` | member | Update person |
+| DELETE | `/api/v1/family/{id}/people/{pid}` | member | Delete person |
+| POST | `/api/v1/family/{id}/relationships` | member | Add relationship (married/parent_of/divorced) |
+| DELETE | `/api/v1/family/{id}/relationships/{rid}` | member | Delete relationship |
+
+**Membership**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| GET | `/api/v1/family/{id}/members` | member | List members with roles |
+| DELETE | `/api/v1/family/{id}/members/{pid}` | owner | Remove a member |
+| POST | `/api/v1/family/join` | open | Join via invite code; body `{player_id, invite_code}` |
+
+**Invites**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| POST | `/api/v1/family/{id}/invite` | owner | Create 6-char invite code |
+| GET | `/api/v1/family/{id}/invite` | owner | List active invite codes |
+| DELETE | `/api/v1/family/{id}/invite/{iid}` | owner | Revoke invite code |
+
+**Tree Views**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| GET | `/api/v1/family/{id}/tree` | member | Full tree (same as GET family/{id}) |
+| GET | `/api/v1/family/{id}/players` | member | People marked as players |
+| GET | `/api/v1/family/{id}/open_items` | member | Placeholders and missing-field report |
+
+**Chat Builder (LLM)**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| POST | `/api/v1/family/{id}/chat` | member | Send message to Claude; applies patches to tree |
+| GET | `/api/v1/family/{id}/chat/history` | member | Chat message history |
+
+**Deck Generation & Editing**
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| POST | `/api/v1/family/{id}/generate/{player_id}` | member | Generate flashcard + trivia decks for a player |
+| GET | `/api/v1/family/{id}/deck/{player_id}` | member | List generated decks for a player |
+| GET | `/api/v1/family/{id}/decks/{deck_id}` | member | List all cards in a generated deck |
+| DELETE | `/api/v1/family/{id}/decks/{deck_id}/cards/{cid}` | member | Remove card + add to exclusion list |
+| GET | `/api/v1/family/{id}/exclusions` | member | List excluded questions |
+| DELETE | `/api/v1/family/{id}/exclusions/{eid}` | member | Restore excluded question |
+
+**Family tree files:**
+
+| File | Purpose |
+|------|---------|
+| `server/family/db.py` | All family DB helpers (tree, membership, invites, deck editing, exclusions) |
+| `server/family/models.py` | Pydantic models for all family features |
+| `server/family/routes.py` | All `/api/v1/family/*` routes with `require_member`/`require_owner` guards |
+| `server/family/engine.py` | Relationship graph engine: `FamilyGraph.compute_relations()` |
+| `server/family/generator.py` | Deterministic flashcard + trivia deck generator (skips excluded questions) |
+| `server/family/llm_client.py` | Claude API chat builder — parses patches from LLM response |
 
 ### Key Files
 
