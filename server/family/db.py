@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import random
+import string
 import uuid
 
 import asyncpg
+from asyncpg import UniqueViolationError
 
 from server.db import get_pool
+
+
+def _generate_invite_code(length: int = 6) -> str:
+    chars = string.ascii_uppercase + string.digits
+    return "".join(random.choices(chars, k=length))
 
 
 # ---------------------------------------------------------------------------
@@ -236,3 +244,125 @@ async def get_chat_history(family_id: str) -> asyncpg.Record | None:
         "FROM family_chat_sessions WHERE family_id = $1 ORDER BY updated_at DESC LIMIT 1",
         family_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Family membership
+# ---------------------------------------------------------------------------
+
+async def add_family_member(family_id: str, player_id: str, role: str = "member") -> asyncpg.Record:
+    p = get_pool()
+    return await p.fetchrow(
+        "INSERT INTO family_members (family_id, player_id, role) VALUES ($1, $2, $3) "
+        "ON CONFLICT (family_id, player_id) DO UPDATE SET role = EXCLUDED.role "
+        "RETURNING family_id, player_id, role, created_at",
+        family_id, player_id, role,
+    )
+
+
+async def remove_family_member(family_id: str, player_id: str) -> bool:
+    p = get_pool()
+    result = await p.execute(
+        "DELETE FROM family_members WHERE family_id = $1 AND player_id = $2",
+        family_id, player_id,
+    )
+    return result == "DELETE 1"
+
+
+async def is_family_member(family_id: str, player_id: str) -> bool:
+    p = get_pool()
+    row = await p.fetchrow(
+        "SELECT 1 FROM family_members WHERE family_id = $1 AND player_id = $2",
+        family_id, player_id,
+    )
+    return row is not None
+
+
+async def get_family_role(family_id: str, player_id: str) -> str | None:
+    p = get_pool()
+    row = await p.fetchrow(
+        "SELECT role FROM family_members WHERE family_id = $1 AND player_id = $2",
+        family_id, player_id,
+    )
+    return row["role"] if row else None
+
+
+async def list_family_members(family_id: str) -> list[asyncpg.Record]:
+    p = get_pool()
+    return await p.fetch(
+        "SELECT family_id, player_id, role, created_at FROM family_members "
+        "WHERE family_id = $1 ORDER BY created_at",
+        family_id,
+    )
+
+
+async def list_player_families(player_id: str) -> list[asyncpg.Record]:
+    p = get_pool()
+    return await p.fetch(
+        "SELECT f.id, f.name, f.created_at, f.updated_at "
+        "FROM families f "
+        "JOIN family_members m ON m.family_id = f.id "
+        "WHERE m.player_id = $1 "
+        "ORDER BY f.created_at DESC",
+        player_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Family invites
+# ---------------------------------------------------------------------------
+
+async def create_family_invite(family_id: str, player_id: str) -> asyncpg.Record:
+    p = get_pool()
+    invite_id = uuid.uuid4()
+    for _ in range(10):
+        code = _generate_invite_code()
+        try:
+            return await p.fetchrow(
+                "INSERT INTO family_invites (id, family_id, invite_code, created_by) "
+                "VALUES ($1, $2, $3, $4) "
+                "RETURNING id, family_id, invite_code, created_by, created_at",
+                invite_id, family_id, code, player_id,
+            )
+        except UniqueViolationError:
+            invite_id = uuid.uuid4()
+            continue
+    raise RuntimeError("Failed to generate unique invite code after 10 attempts")
+
+
+async def get_invite(invite_code: str) -> asyncpg.Record | None:
+    p = get_pool()
+    return await p.fetchrow(
+        "SELECT id, family_id, invite_code, created_by, created_at "
+        "FROM family_invites WHERE invite_code = $1",
+        invite_code,
+    )
+
+
+async def redeem_invite(invite_code: str, player_id: str) -> asyncpg.Record:
+    """Add player as member of the invited family. Returns the family record."""
+    invite = await get_invite(invite_code)
+    if invite is None:
+        raise ValueError("Invalid invite code")
+    family_id = str(invite["family_id"])
+    await add_family_member(family_id, player_id, role="member")
+    p = get_pool()
+    return await p.fetchrow(
+        "SELECT id, name, created_at, updated_at FROM families WHERE id = $1",
+        family_id,
+    )
+
+
+async def list_family_invites(family_id: str) -> list[asyncpg.Record]:
+    p = get_pool()
+    return await p.fetch(
+        "SELECT id, family_id, invite_code, created_by, created_at "
+        "FROM family_invites WHERE family_id = $1 ORDER BY created_at DESC",
+        family_id,
+    )
+
+
+async def delete_family_invite(invite_id: str) -> bool:
+    p = get_pool()
+    result = await p.execute("DELETE FROM family_invites WHERE id = $1", invite_id)
+    return result == "DELETE 1"

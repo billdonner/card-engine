@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from server.db import get_pool
 from server.family import db as fdb
@@ -16,10 +16,13 @@ from server.family.models import (
     CreateFamilyIn,
     CreatePersonIn,
     CreateRelationshipIn,
+    FamilyInviteOut,
+    FamilyMemberOut,
     FamilyOut,
     FamilyTreeOut,
     GenerateDeckIn,
     GenerateDeckOut,
+    JoinFamilyIn,
     OpenItemOut,
     PersonOut,
     RelationshipOut,
@@ -92,33 +95,54 @@ async def _build_tree(family_id: str) -> FamilyTreeOut:
     )
 
 
+async def _require_member(family_id: UUID, player_id: UUID = Query(...)) -> UUID:
+    if not await fdb.is_family_member(str(family_id), str(player_id)):
+        raise HTTPException(403, "Not a member of this family")
+    return player_id
+
+
+async def _require_owner(family_id: UUID, player_id: UUID = Query(...)) -> UUID:
+    role = await fdb.get_family_role(str(family_id), str(player_id))
+    if role != "owner":
+        raise HTTPException(403, "Owner access required")
+    return player_id
+
+
 # ---------------------------------------------------------------------------
 # Family CRUD
 # ---------------------------------------------------------------------------
 
 @router.post("", status_code=201)
 async def create_family(body: CreateFamilyIn) -> FamilyOut:
-    """Create a new family."""
+    """Create a new family. The player_id in the body becomes the owner."""
     row = await fdb.create_family(body.name)
+    family_id = str(row["id"])
+    await fdb.add_family_member(family_id, str(body.player_id), role="owner")
     return _family_out(row)
 
 
 @router.get("")
-async def list_families() -> list[FamilyOut]:
-    """List all families."""
-    rows = await fdb.list_families()
+async def list_families(player_id: UUID = Query(...)) -> list[FamilyOut]:
+    """List families the player belongs to."""
+    rows = await fdb.list_player_families(str(player_id))
     return [_family_out(r) for r in rows]
 
 
 @router.get("/{family_id}")
-async def get_family(family_id: UUID) -> FamilyTreeOut:
+async def get_family(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> FamilyTreeOut:
     """Get a family with full tree."""
     return await _build_tree(str(family_id))
 
 
 @router.delete("/{family_id}")
-async def delete_family(family_id: UUID) -> dict:
-    """Delete a family and all its data."""
+async def delete_family(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_owner),
+) -> dict:
+    """Delete a family and all its data (owner only)."""
     deleted = await fdb.delete_family(str(family_id))
     if not deleted:
         raise HTTPException(404, "Family not found")
@@ -130,7 +154,11 @@ async def delete_family(family_id: UUID) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.post("/{family_id}/people", status_code=201)
-async def create_person(family_id: UUID, body: CreatePersonIn) -> PersonOut:
+async def create_person(
+    family_id: UUID,
+    body: CreatePersonIn,
+    player_id: UUID = Depends(_require_member),
+) -> PersonOut:
     """Add a person to the family."""
     fam = await fdb.get_family(str(family_id))
     if fam is None:
@@ -154,7 +182,12 @@ async def create_person(family_id: UUID, body: CreatePersonIn) -> PersonOut:
 
 
 @router.patch("/{family_id}/people/{person_id}")
-async def update_person(family_id: UUID, person_id: UUID, body: UpdatePersonIn) -> PersonOut:
+async def update_person(
+    family_id: UUID,
+    person_id: UUID,
+    body: UpdatePersonIn,
+    player_id: UUID = Depends(_require_member),
+) -> PersonOut:
     """Update a person's details."""
     if body.status is not None and body.status not in ("living", "deceased"):
         raise HTTPException(400, f"Invalid status: {body.status}")
@@ -179,7 +212,11 @@ async def update_person(family_id: UUID, person_id: UUID, body: UpdatePersonIn) 
 
 
 @router.delete("/{family_id}/people/{person_id}")
-async def delete_person(family_id: UUID, person_id: UUID) -> dict:
+async def delete_person(
+    family_id: UUID,
+    person_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> dict:
     """Delete a person from the family."""
     deleted = await fdb.delete_person(str(person_id))
     if not deleted:
@@ -192,7 +229,11 @@ async def delete_person(family_id: UUID, person_id: UUID) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.post("/{family_id}/relationships", status_code=201)
-async def create_relationship(family_id: UUID, body: CreateRelationshipIn) -> RelationshipOut:
+async def create_relationship(
+    family_id: UUID,
+    body: CreateRelationshipIn,
+    player_id: UUID = Depends(_require_member),
+) -> RelationshipOut:
     """Add a relationship between two people."""
     fam = await fdb.get_family(str(family_id))
     if fam is None:
@@ -213,7 +254,11 @@ async def create_relationship(family_id: UUID, body: CreateRelationshipIn) -> Re
 
 
 @router.delete("/{family_id}/relationships/{rel_id}")
-async def delete_relationship(family_id: UUID, rel_id: UUID) -> dict:
+async def delete_relationship(
+    family_id: UUID,
+    rel_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> dict:
     """Delete a relationship."""
     deleted = await fdb.delete_relationship(str(rel_id))
     if not deleted:
@@ -226,20 +271,29 @@ async def delete_relationship(family_id: UUID, rel_id: UUID) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/{family_id}/tree")
-async def get_tree(family_id: UUID) -> FamilyTreeOut:
+async def get_tree(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> FamilyTreeOut:
     """Get the full family tree."""
     return await _build_tree(str(family_id))
 
 
 @router.get("/{family_id}/players")
-async def get_players(family_id: UUID) -> list[PersonOut]:
+async def get_players(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> list[PersonOut]:
     """Get all players in the family."""
     people = await fdb.list_people(str(family_id))
     return [_person_out(p) for p in people if p["player"]]
 
 
 @router.get("/{family_id}/open_items")
-async def get_open_items(family_id: UUID) -> list[OpenItemOut]:
+async def get_open_items(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> list[OpenItemOut]:
     """Report placeholders and missing fields."""
     people = await fdb.list_people(str(family_id))
     rels = await fdb.list_relationships(str(family_id))
@@ -267,11 +321,111 @@ async def get_open_items(family_id: UUID) -> list[OpenItemOut]:
 
 
 # ---------------------------------------------------------------------------
+# Membership management
+# ---------------------------------------------------------------------------
+
+@router.get("/{family_id}/members")
+async def list_members(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> list[FamilyMemberOut]:
+    """List members of the family."""
+    rows = await fdb.list_family_members(str(family_id))
+    return [
+        FamilyMemberOut(
+            player_id=r["player_id"],
+            role=r["role"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+@router.delete("/{family_id}/members/{member_player_id}")
+async def remove_member(
+    family_id: UUID,
+    member_player_id: UUID,
+    player_id: UUID = Depends(_require_owner),
+) -> dict:
+    """Remove a member from the family (owner only)."""
+    if str(member_player_id) == str(player_id):
+        raise HTTPException(400, "Owner cannot remove themselves")
+    removed = await fdb.remove_family_member(str(family_id), str(member_player_id))
+    if not removed:
+        raise HTTPException(404, "Member not found")
+    return {"removed": True}
+
+
+# ---------------------------------------------------------------------------
+# Invite management
+# ---------------------------------------------------------------------------
+
+@router.post("/{family_id}/invite", status_code=201)
+async def create_invite(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_owner),
+) -> FamilyInviteOut:
+    """Create an invite code for the family (owner only)."""
+    row = await fdb.create_family_invite(str(family_id), str(player_id))
+    return FamilyInviteOut(
+        id=row["id"],
+        invite_code=row["invite_code"],
+        created_at=row["created_at"],
+    )
+
+
+@router.get("/{family_id}/invite")
+async def list_invites(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_owner),
+) -> list[FamilyInviteOut]:
+    """List invite codes for the family (owner only)."""
+    rows = await fdb.list_family_invites(str(family_id))
+    return [
+        FamilyInviteOut(
+            id=r["id"],
+            invite_code=r["invite_code"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+@router.delete("/{family_id}/invite/{invite_id}")
+async def revoke_invite(
+    family_id: UUID,
+    invite_id: UUID,
+    player_id: UUID = Depends(_require_owner),
+) -> dict:
+    """Revoke an invite code (owner only)."""
+    deleted = await fdb.delete_family_invite(str(invite_id))
+    if not deleted:
+        raise HTTPException(404, "Invite not found")
+    return {"deleted": True}
+
+
+@router.post("/join", status_code=200)
+async def join_family(body: JoinFamilyIn) -> FamilyOut:
+    """Join a family by redeeming an invite code."""
+    try:
+        row = await fdb.redeem_invite(body.invite_code, str(body.player_id))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    if row is None:
+        raise HTTPException(404, "Family not found")
+    return _family_out(row)
+
+
+# ---------------------------------------------------------------------------
 # Chat builder
 # ---------------------------------------------------------------------------
 
 @router.post("/{family_id}/chat")
-async def chat_builder(family_id: UUID, body: ChatMessageIn) -> ChatResponseOut:
+async def chat_builder(
+    family_id: UUID,
+    body: ChatMessageIn,
+    player_id: UUID = Depends(_require_member),
+) -> ChatResponseOut:
     """Conversational family tree builder via LLM."""
     from server.family.llm_client import chat as llm_chat
 
@@ -330,7 +484,10 @@ async def chat_builder(family_id: UUID, body: ChatMessageIn) -> ChatResponseOut:
 
 
 @router.get("/{family_id}/chat/history")
-async def get_chat_history(family_id: UUID) -> ChatHistoryOut:
+async def get_chat_history(
+    family_id: UUID,
+    player_id: UUID = Depends(_require_member),
+) -> ChatHistoryOut:
     """Get chat history for a family."""
     row = await fdb.get_chat_history(str(family_id))
     if row is None:
@@ -435,9 +592,17 @@ async def _apply_patch(family_id: str, patch: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 @router.post("/{family_id}/generate/{player_id}")
-async def generate_decks(family_id: UUID, player_id: UUID, body: GenerateDeckIn | None = None) -> GenerateDeckOut:
+async def generate_decks(
+    family_id: UUID,
+    player_id: UUID,
+    body: GenerateDeckIn | None = None,
+    requesting_player_id: UUID = Query(..., alias="player_id"),
+) -> GenerateDeckOut:
     """Generate flashcard and/or trivia decks for a player."""
     from server.family.generator import generate_decks as gen
+
+    if not await fdb.is_family_member(str(family_id), str(requesting_player_id)):
+        raise HTTPException(403, "Not a member of this family")
 
     fam = await fdb.get_family(str(family_id))
     if fam is None:
@@ -480,8 +645,15 @@ async def generate_decks(family_id: UUID, player_id: UUID, body: GenerateDeckIn 
 
 
 @router.get("/{family_id}/deck/{player_id}")
-async def get_generated_decks(family_id: UUID, player_id: UUID) -> list[dict]:
+async def get_generated_decks(
+    family_id: UUID,
+    player_id: UUID,
+    requesting_player_id: UUID = Query(..., alias="player_id"),
+) -> list[dict]:
     """Get deck IDs previously generated for a player."""
+    if not await fdb.is_family_member(str(family_id), str(requesting_player_id)):
+        raise HTTPException(403, "Not a member of this family")
+
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT id, title, kind, card_count, created_at FROM decks "

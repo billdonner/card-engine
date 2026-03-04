@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 class CreateFamilyIn(BaseModel):
     name: str
+    player_id: UUID  # creator becomes owner
 
 
 class FamilyOut(BaseModel):
@@ -148,3 +149,24 @@ class GenerateDeckOut(BaseModel):
     deck_ids: list[UUID]
     cards_created: int
     player_name: str
+
+
+# ---------------------------------------------------------------------------
+# Access control models
+# ---------------------------------------------------------------------------
+
+class FamilyMemberOut(BaseModel):
+    player_id: UUID
+    role: str
+    created_at: datetime
+
+
+class FamilyInviteOut(BaseModel):
+    id: UUID
+    invite_code: str
+    created_at: datetime
+
+
+class JoinFamilyIn(BaseModel):
+    player_id: UUID
+    invite_code: str
