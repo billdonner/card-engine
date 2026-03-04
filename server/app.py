@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -13,7 +14,8 @@ import psutil
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from server.db import (
     close_pool,
@@ -159,6 +161,25 @@ app.include_router(ingestion_router)
 app.include_router(difficulty_router)
 app.include_router(family_router)
 app.include_router(players_router)
+
+
+# ---------------------------------------------------------------------------
+# Serve cardz-studio SPA (if built frontend is present)
+# ---------------------------------------------------------------------------
+
+_studio_web = pathlib.Path("/app/studio-web")
+if not _studio_web.is_dir():
+    _studio_web = pathlib.Path(__file__).resolve().parent.parent / "studio-web"
+if _studio_web.is_dir():
+    app.mount("/studio/assets", StaticFiles(directory=_studio_web / "assets"), name="studio-assets")
+
+    @app.get("/studio")
+    @app.get("/studio/{full_path:path}")
+    async def studio_spa(full_path: str = ""):
+        file = _studio_web / full_path
+        if file.is_file():
+            return FileResponse(file)
+        return FileResponse(_studio_web / "index.html")
 
 
 # ---------------------------------------------------------------------------

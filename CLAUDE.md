@@ -99,6 +99,12 @@ cd ~/card-engine && pip install -e ".[dev]"
 | `CE_DB_NAME` | `card_engine` | Database name |
 | `CE_PORT` | `9810` | Server listen port |
 
+### Embedded cardz-studio
+
+The cardz-studio React SPA is built in a multi-stage Docker build and served at `/studio`. In production: `https://bd-cardzerver.fly.dev/studio`. The SPA uses relative API paths (`/api/v1/...`) so it works without any proxy config.
+
+Deploy builds both Python backend and React frontend: `~/Flyz/scripts/deploy.sh card-engine`
+
 ### Port
 
 **9810** (inherits from obo-server slot in the port registry).
