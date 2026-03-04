@@ -11,6 +11,7 @@ from server.models import (
     CardOut,
     CreateCardIn,
     CreateDeckIn,
+    CreateDeckWithCardsIn,
     DeckDetailOut,
     DeckSummaryOut,
     ReorderCardsIn,
@@ -89,6 +90,57 @@ async def unpublish_deck(deck_id: UUID) -> DeckSummaryOut:
         properties=row["properties"] or {}, card_count=row["card_count"],
         created_at=row["created_at"],
     )
+
+
+@router.post("/decks/bulk", status_code=201)
+async def create_deck_with_cards(body: CreateDeckWithCardsIn) -> DeckDetailOut:
+    """Create a deck with all its cards in a single transaction."""
+    if body.kind not in ("flashcard", "trivia", "newsquiz"):
+        raise HTTPException(400, f"Invalid kind: {body.kind}")
+    for card in body.cards:
+        if card.difficulty not in ("easy", "medium", "hard"):
+            raise HTTPException(400, f"Invalid difficulty: {card.difficulty}")
+
+    card_dicts = [
+        {"question": c.question, "properties": c.properties, "difficulty": c.difficulty}
+        for c in body.cards
+    ]
+    deck_row, card_rows = await db.create_deck_with_cards(
+        body.title, body.kind, body.properties, card_dicts
+    )
+    return DeckDetailOut(
+        id=deck_row["id"],
+        title=deck_row["title"],
+        kind=deck_row["kind"],
+        properties=deck_row["properties"] or {},
+        card_count=len(card_rows),
+        created_at=deck_row["created_at"],
+        cards=[
+            CardOut(
+                id=c["id"], position=c["position"], question=c["question"],
+                properties=c["properties"] or {}, difficulty=c["difficulty"],
+                source_url=c["source_url"], source_date=c["source_date"],
+            )
+            for c in card_rows
+        ],
+    )
+
+
+@router.get("/stats")
+async def get_stats() -> dict:
+    """Deck and card statistics by kind and age range."""
+    return await db.deck_stats()
+
+
+@router.get("/check-duplicate")
+async def check_duplicate(
+    title: str = Query(...), kind: str = Query(...)
+) -> dict:
+    """Check if a deck with the same title and kind already exists."""
+    row = await db.find_deck_by_title(title, kind)
+    if row:
+        return {"exists": True, "id": str(row["id"]), "title": row["title"], "card_count": row["card_count"]}
+    return {"exists": False}
 
 
 @router.delete("/decks/{deck_id}")

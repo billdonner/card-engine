@@ -149,6 +149,19 @@ class UpdateCardIn(BaseModel):
     difficulty: str | None = None
 
 
+class BulkCardIn(BaseModel):
+    question: str
+    properties: dict = {}
+    difficulty: str = "medium"
+
+
+class CreateDeckWithCardsIn(BaseModel):
+    title: str
+    kind: str
+    properties: dict = {}
+    cards: list[BulkCardIn] = []
+
+
 class ReorderCardsIn(BaseModel):
     card_ids: list[UUID]
 

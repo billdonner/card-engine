@@ -255,6 +255,72 @@ async def delete_deck(deck_id: str) -> bool:
     return result == "DELETE 1"
 
 
+async def create_deck_with_cards(
+    title: str, kind: str, properties: dict, cards: list[dict]
+) -> tuple[asyncpg.Record, list[asyncpg.Record]]:
+    """Create a deck with all its cards in a single transaction.
+
+    cards: list of dicts with keys: question, properties, difficulty
+    Returns (deck_row, card_rows).
+    """
+    p = get_pool()
+    deck_id = uuid.uuid4()
+    props = {**properties, "status": properties.get("status", "draft")}
+
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            deck_row = await conn.fetchrow(
+                "INSERT INTO decks (id, title, kind, properties) "
+                "VALUES ($1, $2, $3::deck_kind, $4) "
+                "RETURNING id, title, kind, properties, card_count, created_at",
+                deck_id, title, kind, props,
+            )
+            card_rows = []
+            for pos, card in enumerate(cards):
+                card_id = uuid.uuid4()
+                row = await conn.fetchrow(
+                    "INSERT INTO cards (id, deck_id, position, question, properties, difficulty) "
+                    "VALUES ($1, $2, $3, $4, $5, $6::difficulty) "
+                    "RETURNING id, deck_id, position, question, properties, difficulty, source_url, source_date",
+                    card_id, deck_id, pos, card["question"], card.get("properties", {}),
+                    card.get("difficulty", "medium"),
+                )
+                card_rows.append(row)
+    return deck_row, card_rows
+
+
+async def deck_stats() -> dict:
+    """Deck/card statistics by kind and age range."""
+    p = get_pool()
+    by_kind = await p.fetch(
+        "SELECT kind::text, COUNT(*)::int AS deck_count, "
+        "COALESCE(SUM(card_count), 0)::int AS card_count "
+        "FROM decks GROUP BY kind ORDER BY kind"
+    )
+    by_age = await p.fetch(
+        "SELECT COALESCE(properties->>'age_range', 'unset') AS age_range, COUNT(*)::int AS deck_count "
+        "FROM decks GROUP BY 1 ORDER BY 1"
+    )
+    total_decks = sum(r["deck_count"] for r in by_kind)
+    total_cards = sum(r["card_count"] for r in by_kind)
+    return {
+        "total_decks": total_decks,
+        "total_cards": total_cards,
+        "by_kind": [{"kind": r["kind"], "decks": r["deck_count"], "cards": r["card_count"]} for r in by_kind],
+        "by_age_range": [{"age_range": r["age_range"], "decks": r["deck_count"]} for r in by_age],
+    }
+
+
+async def find_deck_by_title(title: str, kind: str) -> asyncpg.Record | None:
+    """Find a deck by exact title (case-insensitive) and kind."""
+    p = get_pool()
+    return await p.fetchrow(
+        "SELECT id, title, kind, card_count, created_at FROM decks "
+        "WHERE LOWER(title) = LOWER($1) AND kind = $2::deck_kind LIMIT 1",
+        title, kind,
+    )
+
+
 async def create_card(deck_id: str, question: str, properties: dict, difficulty: str) -> asyncpg.Record:
     """Create a new card in the given deck."""
     p = get_pool()
