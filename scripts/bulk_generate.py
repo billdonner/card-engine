@@ -332,6 +332,8 @@ async def load_existing_questions(pool: asyncpg.Pool, categories: list[str]) -> 
                 props = json.loads(props)
             except (json.JSONDecodeError, TypeError):
                 props = {}
+        if not isinstance(props, dict):
+            props = {}
         choices = props.get("choices", [])
         correct_idx = props.get("correct_index", 0)
         correct_answer = ""
@@ -395,6 +397,8 @@ async def find_all_duplicates(pool: asyncpg.Pool) -> list[tuple[dict, dict]]:
                 props = json.loads(props)
             except (json.JSONDecodeError, TypeError):
                 props = {}
+        if not isinstance(props, dict):
+            props = {}
         choices = props.get("choices", [])
         correct_idx = props.get("correct_index", 0)
         correct_answer = ""
