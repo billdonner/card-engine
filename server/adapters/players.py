@@ -12,6 +12,7 @@ from server.db import (
     get_player,
     get_player_stats,
     get_session_by_share_code,
+    update_session_properties,
     upsert_player,
 )
 from server.models import (
@@ -21,6 +22,8 @@ from server.models import (
     PlayerOut,
     PlayerStatsOut,
     ResetOut,
+    SessionUpdateIn,
+    SessionUpdateOut,
 )
 
 router = APIRouter(tags=["players"])
@@ -84,9 +87,10 @@ async def reset_player(
 # Session replay endpoint
 # ---------------------------------------------------------------------------
 
-@router.get("/api/v1/sessions/{share_code}", response_model=GameDataOut)
+@router.get("/api/v1/sessions/{share_code}")
 async def replay_session(share_code: str):
-    """Replay a shared session — returns the same challenges in order."""
+    """Replay a shared session — returns the same challenges in order,
+    plus any challenge metadata stored in properties."""
     session, rows = await get_session_by_share_code(share_code)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -124,8 +128,23 @@ async def replay_session(share_code: str):
             )
         )
 
-    return GameDataOut(
+    result = GameDataOut(
         id=str(session["id"]),
         generated=session["created_at"].isoformat(),
         challenges=challenges,
-    )
+    ).model_dump()
+
+    # Include challenge metadata from session properties
+    session_props = session["properties"] if isinstance(session["properties"], dict) else {}
+    result["challenge"] = session_props.get("challenge")
+
+    return result
+
+
+@router.patch("/api/v1/sessions/{session_id}", response_model=SessionUpdateOut)
+async def patch_session(session_id: UUID, body: SessionUpdateIn):
+    """Update session properties — used to save challenge metadata after a game."""
+    row = await update_session_properties(session_id, body.properties)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionUpdateOut(id=str(row["id"]), properties=row["properties"])

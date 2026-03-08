@@ -234,3 +234,12 @@ class PlayerStatsOut(BaseModel):
 class ResetOut(BaseModel):
     player_id: UUID
     cleared: int
+
+
+class SessionUpdateIn(BaseModel):
+    properties: dict
+
+
+class SessionUpdateOut(BaseModel):
+    id: str
+    properties: dict

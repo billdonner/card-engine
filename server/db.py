@@ -607,7 +607,7 @@ async def get_session_by_share_code(share_code: str) -> tuple[asyncpg.Record | N
     """
     p = get_pool()
     session = await p.fetchrow(
-        "SELECT id, player_id, share_code, app_id, created_at FROM sessions WHERE share_code = $1",
+        "SELECT id, player_id, share_code, app_id, properties, created_at FROM sessions WHERE share_code = $1",
         share_code.upper(),
     )
     if session is None:
@@ -628,6 +628,16 @@ async def get_session_by_share_code(share_code: str) -> tuple[asyncpg.Record | N
         session["id"],
     )
     return session, rows
+
+
+async def update_session_properties(session_id: uuid.UUID, properties: dict) -> asyncpg.Record | None:
+    """Merge properties into an existing session's JSONB column."""
+    p = get_pool()
+    return await p.fetchrow(
+        "UPDATE sessions SET properties = properties || $2::jsonb "
+        "WHERE id = $1 RETURNING id, properties",
+        session_id, properties,
+    )
 
 
 async def get_player_count() -> int:
