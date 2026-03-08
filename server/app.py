@@ -185,6 +185,119 @@ if _studio_web.is_dir():
 
 
 # ---------------------------------------------------------------------------
+# Qross public pages (support, privacy)
+# ---------------------------------------------------------------------------
+
+_QROSS_STYLE = """
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px;
+         margin: 0 auto; padding: 40px 20px; background: #1a1a2e; color: #e0e0e0;
+         line-height: 1.6; }
+  h1 { font-size: 2rem; background: linear-gradient(135deg, #667eea, #764ba2, #f093fb);
+       -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  h2 { color: #b0b0cc; margin-top: 2em; }
+  a { color: #667eea; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .btn { display: inline-block; padding: 12px 28px; border-radius: 12px;
+         background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+         font-weight: 600; text-decoration: none; margin: 8px 4px; }
+  ul { padding-left: 1.2em; }
+  li { margin-bottom: 0.4em; }
+  .footer { margin-top: 3em; font-size: 0.85rem; color: #666; }
+"""
+
+
+@app.get("/support")
+async def qross_support():
+    """Support page for Qross — used as App Store Support URL."""
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qross — Support</title>
+<style>{_QROSS_STYLE}</style>
+</head><body>
+<h1>Qross Support</h1>
+<p>Qross is a grid-based trivia strategy game for iPhone and iPad.</p>
+
+<h2>How to Play</h2>
+<ul>
+  <li>Pick a corner to start, then navigate to the opposite corner</li>
+  <li>Answer trivia questions to advance — wrong answers block your path</li>
+  <li>Use hints and the AI move advisor to find the best route</li>
+  <li>Challenge friends to beat your exact board</li>
+</ul>
+
+<h2>Frequently Asked Questions</h2>
+<p><strong>Do I need an account?</strong><br>
+No. Qross generates a device ID automatically — no login required.</p>
+
+<p><strong>Does it work offline?</strong><br>
+You need an internet connection for the first launch to load questions. After that, cached questions work offline.</p>
+
+<p><strong>How do challenges work?</strong><br>
+After finishing a game, tap Share. Your friend receives a link that opens the exact same board — same questions, same layout, same starting corner. After they play, scores are compared side-by-side.</p>
+
+<p><strong>What is the AI Move Advisor?</strong><br>
+A smart assistant that suggests the best next move based on path length, topic difficulty, and escape routes. On devices with Apple Intelligence, it also explains its reasoning.</p>
+
+<h2>Contact</h2>
+<p>For bug reports, feedback, or questions:</p>
+<p><a class="btn" href="mailto:support@qross.app">Email support@qross.app</a></p>
+<p><a class="btn" href="https://github.com/billdonner/qross/issues">Report an Issue on GitHub</a></p>
+
+<h2>Get the App</h2>
+<p><a class="btn" href="https://testflight.apple.com/join/W6VjPWV6">Join the TestFlight Beta</a></p>
+
+<div class="footer">&copy; 2026 Bill Donner. <a href="/privacy">Privacy Policy</a></div>
+</body></html>""")
+
+
+@app.get("/privacy")
+async def qross_privacy():
+    """Privacy policy for Qross — linked from support page."""
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qross — Privacy Policy</title>
+<style>{_QROSS_STYLE}</style>
+</head><body>
+<h1>Qross Privacy Policy</h1>
+<p><em>Last updated: March 2026</em></p>
+
+<h2>Data We Collect</h2>
+<p>Qross collects minimal data to provide the game experience:</p>
+<ul>
+  <li><strong>Device ID:</strong> A randomly generated UUID stored on your device, used to track your game sessions and avoid repeating questions. This is not linked to your Apple ID or any personal information.</li>
+  <li><strong>Game sessions:</strong> Board size, score, and move count are recorded to enable challenge mode and leaderboards.</li>
+  <li><strong>Question reports:</strong> If you report a question as inaccurate, the question text and your device ID are sent to our server.</li>
+</ul>
+
+<h2>Data We Do NOT Collect</h2>
+<ul>
+  <li>No names, email addresses, or personal information</li>
+  <li>No location data</li>
+  <li>No advertising identifiers or tracking</li>
+  <li>No analytics SDKs or third-party trackers</li>
+</ul>
+
+<h2>Third-Party Services</h2>
+<ul>
+  <li><strong>Apple Game Center:</strong> If you sign in to Game Center, Apple handles leaderboard data under their own privacy policy.</li>
+  <li><strong>Apple Intelligence:</strong> AI hints and analysis run on-device. No question data is sent to external AI services.</li>
+</ul>
+
+<h2>Data Storage</h2>
+<p>Game session data is stored on our server (hosted on Fly.io) and retained indefinitely to support challenge replays. You can request deletion by emailing <a href="mailto:support@qross.app">support@qross.app</a>.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy? Email <a href="mailto:support@qross.app">support@qross.app</a>.</p>
+
+<div class="footer">&copy; 2026 Bill Donner. <a href="/support">Back to Support</a></div>
+</body></html>""")
+
+
+# ---------------------------------------------------------------------------
 # Apple App Site Association (Universal Links for Qross)
 # ---------------------------------------------------------------------------
 
