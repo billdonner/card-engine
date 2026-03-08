@@ -206,7 +206,7 @@ _QROSS_STYLE = """
 """
 
 
-@app.get("/support")
+@app.get("/qross/support")
 async def qross_support():
     """Support page for Qross — used as App Store Support URL."""
     return HTMLResponse(f"""<!DOCTYPE html>
@@ -248,11 +248,11 @@ A smart assistant that suggests the best next move based on path length, topic d
 <h2>Get the App</h2>
 <p><a class="btn" href="https://testflight.apple.com/join/W6VjPWV6">Join the TestFlight Beta</a></p>
 
-<div class="footer">&copy; 2026 Bill Donner. <a href="/privacy">Privacy Policy</a></div>
+<div class="footer">&copy; 2026 Bill Donner. <a href="/qross/privacy">Privacy Policy</a></div>
 </body></html>""")
 
 
-@app.get("/privacy")
+@app.get("/qross/privacy")
 async def qross_privacy():
     """Privacy policy for Qross — linked from support page."""
     return HTMLResponse(f"""<!DOCTYPE html>
@@ -293,7 +293,7 @@ async def qross_privacy():
 <h2>Contact</h2>
 <p>Questions about this policy? Email <a href="mailto:support@qross.app">support@qross.app</a>.</p>
 
-<div class="footer">&copy; 2026 Bill Donner. <a href="/support">Back to Support</a></div>
+<div class="footer">&copy; 2026 Bill Donner. <a href="/qross/support">Back to Support</a></div>
 </body></html>""")
 
 
