@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 import asyncpg
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
-import scipy.sparse
 
 logger = logging.getLogger("card_engine.quality.dedup")
 
@@ -126,36 +125,42 @@ def find_near_duplicates(
     )
     tfidf_matrix = vectorizer.fit_transform(texts)
 
-    # Use sparse dot product to stay memory-efficient on small VMs.
-    # tfidf_matrix is already sparse (CSR); A * A^T gives cosine similarity
-    # when rows are L2-normalized (which TfidfVectorizer does by default).
-    # We threshold the sparse result to only keep high-similarity pairs.
+    # Process in small row batches to stay under 256MB memory.
+    # Each batch: compute dot product of a few rows against the full matrix,
+    # extract above-threshold pairs, then discard the batch result.
 
     if exact_sigs is None:
         exact_sigs = set()
 
-    # Sparse cosine similarity — stays sparse, no dense matrix
-    sim_sparse = tfidf_matrix * tfidf_matrix.T  # sparse CSR, only non-zero entries
-
-    # Threshold: zero out entries below threshold to save memory
-    sim_sparse = sim_sparse.multiply(sim_sparse >= threshold)
-    sim_sparse.eliminate_zeros()
-
-    # Zero out diagonal (self-similarity)
-    sim_sparse.setdiag(0)
-    sim_sparse.eliminate_zeros()
-
-    # Build clusters via union-find on the sparse similarity graph
     n = tfidf_matrix.shape[0]
+    batch_size = 200  # small enough to avoid OOM on 256MB VM
+    adj: dict[int, list[tuple[int, float]]] = {}
+
+    tfidf_t = tfidf_matrix.T.tocsc()  # transpose once for efficient column slicing
+
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        batch = tfidf_matrix[start:end]
+
+        # Sparse dot product: (end-start) x n_features @ n_features x n → (end-start) x n
+        sim_batch = batch.dot(tfidf_t)
+
+        # Convert to COO to iterate only non-zero entries
+        coo = sim_batch.tocoo()
+        for local_i, j, v in zip(coo.row, coo.col, coo.data):
+            global_i = start + local_i
+            if global_i == j:
+                continue  # skip self
+            if v < threshold:
+                continue
+            if global_i < j:  # only store each pair once
+                adj.setdefault(global_i, []).append((j, float(v)))
+
+        del sim_batch, coo  # free memory immediately
+
+    # Build clusters from adjacency graph
     clusters_map: dict[int, list[int]] = {}
     assigned: set[int] = set()
-
-    coo = sim_sparse.tocoo()
-    # Build adjacency from sparse entries
-    adj: dict[int, list[tuple[int, float]]] = {}
-    for i, j, v in zip(coo.row, coo.col, coo.data):
-        if i < j:  # avoid double-counting
-            adj.setdefault(i, []).append((j, v))
 
     for i in sorted(adj.keys()):
         if i in assigned:
@@ -171,21 +176,14 @@ def find_near_duplicates(
         if len(sigs) == 1 and next(iter(sigs)) in exact_sigs:
             continue
 
+        avg_sim = float(np.mean([v for _, v in neighbors]))
+
         for m in member_indices:
             assigned.add(m)
-        clusters_map[i] = member_indices
+        clusters_map[i] = (member_indices, avg_sim)
 
     clusters = []
-    for rep_idx, member_indices in clusters_map.items():
-        # Compute average similarity from the sparse matrix entries
-        sims = []
-        for idx_a in range(len(member_indices)):
-            for idx_b in range(idx_a + 1, len(member_indices)):
-                i, j = member_indices[idx_a], member_indices[idx_b]
-                s = sim_sparse[i, j]
-                if s > 0:
-                    sims.append(s)
-        avg_sim = float(np.mean(sims)) if sims else threshold
+    for rep_idx, (member_indices, avg_sim) in clusters_map.items():
 
         clusters.append(DupCluster(
             card_ids=[cards[i]["id"] for i in member_indices],
