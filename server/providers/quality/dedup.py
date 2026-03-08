@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 
 import asyncpg
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import scipy.sparse
 
 logger = logging.getLogger("card_engine.quality.dedup")
 
@@ -126,65 +126,72 @@ def find_near_duplicates(
     )
     tfidf_matrix = vectorizer.fit_transform(texts)
 
-    # For large corpora, process in batches to avoid memory explosion
-    n = tfidf_matrix.shape[0]
-    batch_size = 2000
-    clusters_map: dict[int, list[int]] = {}  # representative_idx -> [member indices]
-    assigned: set[int] = set()
+    # Use sparse dot product to stay memory-efficient on small VMs.
+    # tfidf_matrix is already sparse (CSR); A * A^T gives cosine similarity
+    # when rows are L2-normalized (which TfidfVectorizer does by default).
+    # We threshold the sparse result to only keep high-similarity pairs.
 
-    # Build exact-sig set for filtering
     if exact_sigs is None:
         exact_sigs = set()
 
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        batch = tfidf_matrix[start:end]
+    # Sparse cosine similarity — stays sparse, no dense matrix
+    sim_sparse = tfidf_matrix * tfidf_matrix.T  # sparse CSR, only non-zero entries
 
-        # Compare this batch against ALL cards
-        sim_matrix = cosine_similarity(batch, tfidf_matrix)
+    # Threshold: zero out entries below threshold to save memory
+    sim_sparse = sim_sparse.multiply(sim_sparse >= threshold)
+    sim_sparse.eliminate_zeros()
 
-        for local_i in range(end - start):
-            global_i = start + local_i
-            if global_i in assigned:
-                continue
+    # Zero out diagonal (self-similarity)
+    sim_sparse.setdiag(0)
+    sim_sparse.eliminate_zeros()
 
-            row = sim_matrix[local_i]
-            # Find all cards similar to this one (above threshold, not self)
-            similar_indices = np.where(row >= threshold)[0]
-            members = [int(j) for j in similar_indices if j != global_i and j not in assigned]
+    # Build clusters via union-find on the sparse similarity graph
+    n = tfidf_matrix.shape[0]
+    clusters_map: dict[int, list[int]] = {}
+    assigned: set[int] = set()
 
-            if not members:
-                continue
+    coo = sim_sparse.tocoo()
+    # Build adjacency from sparse entries
+    adj: dict[int, list[tuple[int, float]]] = {}
+    for i, j, v in zip(coo.row, coo.col, coo.data):
+        if i < j:  # avoid double-counting
+            adj.setdefault(i, []).append((j, v))
 
-            # Check if this cluster is already fully covered by exact matching
-            all_members = [global_i] + members
-            sigs = {f"{_normalize(cards[m]['question'])}|{_normalize(cards[m]['correct_answer'])}" for m in all_members}
-            if len(sigs) == 1 and next(iter(sigs)) in exact_sigs:
-                continue
+    for i in sorted(adj.keys()):
+        if i in assigned:
+            continue
+        neighbors = [(j, v) for j, v in adj[i] if j not in assigned]
+        if not neighbors:
+            continue
 
-            cluster_members = [global_i] + members
-            for m in cluster_members:
-                assigned.add(m)
+        member_indices = [i] + [j for j, _ in neighbors]
 
-            clusters_map[global_i] = cluster_members
+        # Check if this cluster is already fully covered by exact matching
+        sigs = {f"{_normalize(cards[m]['question'])}|{_normalize(cards[m]['correct_answer'])}" for m in member_indices}
+        if len(sigs) == 1 and next(iter(sigs)) in exact_sigs:
+            continue
+
+        for m in member_indices:
+            assigned.add(m)
+        clusters_map[i] = member_indices
 
     clusters = []
     for rep_idx, member_indices in clusters_map.items():
-        # Compute pairwise similarity for the cluster
-        sub_matrix = tfidf_matrix[member_indices]
-        pairwise = cosine_similarity(sub_matrix)
-        # Average off-diagonal similarity
-        n_members = len(member_indices)
-        if n_members > 1:
-            total_sim = (pairwise.sum() - n_members) / (n_members * (n_members - 1))
-        else:
-            total_sim = 1.0
+        # Compute average similarity from the sparse matrix entries
+        sims = []
+        for idx_a in range(len(member_indices)):
+            for idx_b in range(idx_a + 1, len(member_indices)):
+                i, j = member_indices[idx_a], member_indices[idx_b]
+                s = sim_sparse[i, j]
+                if s > 0:
+                    sims.append(s)
+        avg_sim = float(np.mean(sims)) if sims else threshold
 
         clusters.append(DupCluster(
             card_ids=[cards[i]["id"] for i in member_indices],
             questions=[cards[i]["question"] for i in member_indices],
             correct_answers=[cards[i]["correct_answer"] for i in member_indices],
-            similarity=round(float(total_sim), 3),
+            similarity=round(float(avg_sim), 3),
             match_type="near",
         ))
 
