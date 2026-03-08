@@ -186,6 +186,22 @@ Request body for POST: `{ "app_id": "qross", "challenge_id": "...", "question_te
 | POST | `/api/v1/ingestion/resume` | Resume from paused state |
 | GET | `/api/v1/ingestion/runs` | Recent source_run audit log |
 
+#### Quality Control (Layer 2) — dedup, veracity, quarantine
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/quality/dedup/scan` | Scan full corpus for exact + near duplicates |
+| POST | `/api/v1/quality/dedup/purge` | Quarantine duplicates (keeps first in cluster) |
+| POST | `/api/v1/quality/veracity/check` | Verify trivia facts via LLM (Claude or GPT) |
+| POST | `/api/v1/quality/answer-in-question/scan` | Find/delete answer-in-question cards |
+| GET | `/api/v1/quality/quarantine` | List quarantined cards (paginated) |
+| POST | `/api/v1/quality/quarantine/{id}/restore` | Un-quarantine a card |
+| DELETE | `/api/v1/quality/quarantine/{id}` | Permanently delete a quarantined card |
+| GET | `/api/v1/quality/quarantine/review` | Lightweight web UI for human review |
+| GET | `/api/v1/quality/stats` | Quality control statistics |
+
+CLI: `trivia-check` (installed to `~/bin/`). Commands: `dedup`, `veracity`, `aiq`, `scan`, `quarantine`, `stats`. Global `--dry-run` flag for read-only mode.
+
 #### AI Difficulty Scoring (Layer 2) — batch scoring
 
 | Method | Path | Description |
@@ -290,6 +306,11 @@ All family endpoints require `?player_id=<uuid>` (device identity). Families are
 | `server/providers/routes.py` | `/api/v1/ingestion/*` control endpoints |
 | `server/providers/difficulty.py` | Claude Haiku batch difficulty scorer |
 | `server/providers/difficulty_routes.py` | `/api/v1/difficulty/*` control endpoints |
+| `server/adapters/quality.py` | `/api/v1/quality/*` routes + quarantine review HTML |
+| `server/providers/quality/dedup.py` | TF-IDF + cosine similarity corpus-wide dedup |
+| `server/providers/quality/veracity.py` | LLM-based fact checking (Claude + GPT) |
+| `server/providers/quality/answer_in_question.py` | Answer-in-question detector |
+| `scripts/trivia_check.py` | CLI tool (installed as `~/bin/trivia-check`) |
 
 ## AI Difficulty Scoring
 

@@ -130,13 +130,15 @@ async def get_deck(deck_id: str) -> tuple[asyncpg.Record | None, list[asyncpg.Re
 
 
 async def get_all_decks_with_cards(
-    kind: str, tier: str | None = None, categories: list[str] | None = None
+    kind: str, tier: str | None = None, categories: list[str] | None = None,
+    exclude_quarantined: bool = False,
 ) -> list[asyncpg.Record]:
     """Bulk-fetch all decks of a given kind with their cards via LEFT JOIN.
 
     Returns rows with both deck and card columns; caller groups by deck.
     """
     p = get_pool()
+    quarantine_filter = "AND c.quarantined = FALSE " if exclude_quarantined else ""
     sql = (
         "SELECT d.id AS deck_id, d.title, d.kind, d.properties AS deck_props, "
         "       d.card_count, d.created_at AS deck_created, "
@@ -144,7 +146,7 @@ async def get_all_decks_with_cards(
         "       c.properties AS card_props, c.difficulty, "
         "       c.source_url, c.source_date "
         "FROM decks d "
-        "LEFT JOIN cards c ON c.deck_id = d.id "
+        f"LEFT JOIN cards c ON c.deck_id = d.id {quarantine_filter}"
         "WHERE d.kind = $1::deck_kind "
         "  AND COALESCE(d.properties->>'status', 'published') = 'published' "
     )

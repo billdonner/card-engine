@@ -151,6 +151,7 @@ from server.providers.routes import router as ingestion_router  # noqa: E402
 from server.providers.difficulty_routes import router as difficulty_router  # noqa: E402
 from server.family.routes import router as family_router  # noqa: E402
 from server.adapters.players import router as players_router  # noqa: E402
+from server.adapters.quality import router as quality_router  # noqa: E402
 
 app.include_router(generic_router)
 app.include_router(flashcards_router)
@@ -161,6 +162,7 @@ app.include_router(ingestion_router)
 app.include_router(difficulty_router)
 app.include_router(family_router)
 app.include_router(players_router)
+app.include_router(quality_router)
 
 
 # ---------------------------------------------------------------------------

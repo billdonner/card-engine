@@ -79,7 +79,7 @@ async def get_gamedata(
     a session is auto-created, and the response includes session metadata.
     """
     cat_list = [c.strip() for c in categories.split(",") if c.strip()] if categories else None
-    rows = await get_all_decks_with_cards("trivia", tier=tier, categories=cat_list)
+    rows = await get_all_decks_with_cards("trivia", tier=tier, categories=cat_list, exclude_quarantined=True)
 
     challenges = _build_challenges(rows)
     total_available = len(challenges)
