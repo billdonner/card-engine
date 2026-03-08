@@ -120,8 +120,8 @@ def find_near_duplicates(
 
     vectorizer = TfidfVectorizer(
         analyzer="word",
-        ngram_range=(1, 2),
-        max_features=50_000,
+        ngram_range=(1, 1),  # unigrams only to limit memory
+        max_features=10_000,
     )
     tfidf_matrix = vectorizer.fit_transform(texts)
 
@@ -133,7 +133,7 @@ def find_near_duplicates(
         exact_sigs = set()
 
     n = tfidf_matrix.shape[0]
-    batch_size = 200  # small enough to avoid OOM on 256MB VM
+    batch_size = 100  # small enough to avoid OOM on 256MB VM
     adj: dict[int, list[tuple[int, float]]] = {}
 
     tfidf_t = tfidf_matrix.T.tocsc()  # transpose once for efficient column slicing
