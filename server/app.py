@@ -188,11 +188,12 @@ if _studio_web.is_dir():
 
 _AASA = {
     "applinks": {
-        "apps": [],
         "details": [
             {
-                "appID": "NEAY582ME4.com.qross.app",
-                "paths": ["/challenge/*"],
+                "appIDs": ["NEAY582ME4.com.qross.app"],
+                "components": [
+                    {"/": "/challenge/*"}
+                ],
             }
         ],
     }
