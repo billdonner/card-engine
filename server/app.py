@@ -14,7 +14,7 @@ import psutil
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.db import (
@@ -180,6 +180,82 @@ if _studio_web.is_dir():
         if file.is_file():
             return FileResponse(file)
         return FileResponse(_studio_web / "index.html")
+
+
+# ---------------------------------------------------------------------------
+# Apple App Site Association (Universal Links for Qross)
+# ---------------------------------------------------------------------------
+
+_AASA = {
+    "applinks": {
+        "apps": [],
+        "details": [
+            {
+                "appID": "NEAY582ME4.com.qross.app",
+                "paths": ["/challenge/*"],
+            }
+        ],
+    }
+}
+
+
+@app.get("/.well-known/apple-app-site-association")
+async def apple_app_site_association():
+    """Serve AASA file for Universal Links."""
+    return JSONResponse(content=_AASA, headers={"Content-Type": "application/json"})
+
+
+@app.get("/challenge/{code}")
+async def challenge_redirect(code: str):
+    """Deep link landing page for challenge shares.
+
+    iOS devices with Qross installed get routed directly to the app
+    via Universal Links.  Everyone else sees a simple landing page.
+    """
+    code_upper = code.upper()
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qross Challenge {code_upper}</title>
+<style>
+  body {{ font-family: -apple-system, system-ui, sans-serif; text-align: center;
+         padding: 60px 20px; background: #1a1a2e; color: #fff; }}
+  h1 {{ font-size: 2.5rem; background: linear-gradient(135deg, #667eea, #764ba2, #f093fb);
+       -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
+  .code {{ font-size: 1.5rem; letter-spacing: 0.3em; margin: 20px 0;
+           padding: 12px 24px; background: rgba(255,255,255,0.1); border-radius: 12px;
+           display: inline-block; }}
+  a {{ color: #667eea; text-decoration: none; font-weight: 600; }}
+  .cta {{ margin-top: 30px; }}
+  .btn {{ display: inline-block; padding: 14px 32px; border-radius: 12px;
+          background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+          font-size: 1.1rem; font-weight: 600; text-decoration: none; margin: 8px; }}
+  .secondary {{ background: rgba(255,255,255,0.15); }}
+  #status {{ font-size: 0.85rem; color: #aaa; margin-top: 12px; }}
+</style>
+</head><body>
+<h1>Qross</h1>
+<p>You've been challenged!</p>
+<div class="code">{code_upper}</div>
+<p id="status">Opening Qross...</p>
+<div class="cta">
+  <a class="btn" id="open-btn" href="qross://challenge/{code_upper}">Open in Qross</a>
+  <br>
+  <a class="btn secondary" href="https://testflight.apple.com/join/W6VjPWV6">Get Qross on TestFlight</a>
+</div>
+<script>
+  // Try opening the app via custom scheme after a short delay
+  setTimeout(function() {{
+    window.location.href = "qross://challenge/{code_upper}";
+  }}, 500);
+  // Update status if we're still on the page after 2s
+  setTimeout(function() {{
+    document.getElementById("status").textContent =
+      "Tap 'Open in Qross' above, or get the app via TestFlight.";
+  }}, 2000);
+</script>
+</body></html>""")
 
 
 # ---------------------------------------------------------------------------
