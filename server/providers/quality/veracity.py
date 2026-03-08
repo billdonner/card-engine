@@ -227,7 +227,8 @@ async def load_cards_for_veracity(
 
     cards = []
     for r in rows:
-        props = r["properties"] or {}
+        raw_props = r["properties"]
+        props = raw_props if isinstance(raw_props, dict) else {}
         choices = props.get("choices", [])
         correct_idx = props.get("correct_index", 0)
 

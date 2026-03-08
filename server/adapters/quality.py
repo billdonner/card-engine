@@ -206,7 +206,8 @@ async def quarantine_list(
 
     items = []
     for r in rows:
-        props = r["properties"] or {}
+        raw_props = r["properties"]
+        props = raw_props if isinstance(raw_props, dict) else {}
         choices = props.get("choices", [])
         correct_idx = props.get("correct_index", 0)
         answers = [c["text"] if isinstance(c, dict) else str(c) for c in choices]
