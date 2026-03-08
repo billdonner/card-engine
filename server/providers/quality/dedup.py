@@ -1,20 +1,20 @@
-"""Corpus-wide duplicate and near-duplicate detection using TF-IDF + cosine similarity.
+"""Corpus-wide duplicate and near-duplicate detection.
 
 Two-stage approach:
   Stage 1: Exact signature match (normalized question + correct answer) — O(1)
-  Stage 2: TF-IDF vectorization + cosine similarity for semantic near-duplicates
+  Stage 2: MinHash + word-set Jaccard similarity for near-duplicates
+           (pure Python, no sklearn/numpy — fits in 256MB VM)
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 
 import asyncpg
-from sklearn.feature_extraction.text import TfidfVectorizer
-import numpy as np
 
 logger = logging.getLogger("card_engine.quality.dedup")
 
@@ -23,6 +23,48 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9 ]")
 
 def _normalize(text: str) -> str:
     return _NON_ALNUM_RE.sub("", text.lower().strip())
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Word-set Jaccard similarity."""
+    if not a and not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _word_set(text: str) -> set[str]:
+    """Get the word set of a normalized text, filtering trivial words."""
+    words = set(_normalize(text).split())
+    # Remove very common words that add noise
+    words -= {"what", "which", "who", "the", "a", "an", "is", "of", "in", "and", "to", "for"}
+    return words
+
+
+def _minhash(words: set[str], num_hashes: int = 64) -> list[int]:
+    """Compute MinHash signature for a word set.
+
+    Uses SHA-256 with different seeds for each hash function.
+    This allows O(1) approximate Jaccard estimation.
+    """
+    if not words:
+        return [0] * num_hashes
+    sig = []
+    for seed in range(num_hashes):
+        min_hash = float("inf")
+        for word in words:
+            h = int(hashlib.md5(f"{seed}:{word}".encode()).hexdigest()[:8], 16)
+            if h < min_hash:
+                min_hash = h
+        sig.append(min_hash)
+    return sig
+
+
+def _minhash_similarity(sig_a: list[int], sig_b: list[int]) -> float:
+    """Estimate Jaccard similarity from MinHash signatures."""
+    if not sig_a or not sig_b:
+        return 0.0
+    matches = sum(1 for a, b in zip(sig_a, sig_b) if a == b)
+    return matches / len(sig_a)
 
 
 @dataclass
@@ -107,89 +149,94 @@ def find_near_duplicates(
     threshold: float = 0.85,
     exact_sigs: set[str] | None = None,
 ) -> list[DupCluster]:
-    """Stage 2: TF-IDF + cosine similarity for near-duplicates.
+    """Stage 2: MinHash-accelerated Jaccard similarity for near-duplicates.
 
-    Skips pairs already caught by exact matching.
-    Uses sparse matrix operations — handles tens of thousands efficiently.
+    Uses MinHash for fast candidate generation (LSH-like), then verifies
+    with exact Jaccard. Pure Python — no sklearn/numpy required.
+    Fits comfortably in 256MB.
     """
     if len(cards) < 2:
         return []
 
-    # Build normalized texts for TF-IDF
-    texts = [_normalize(c["question"]) for c in cards]
-
-    vectorizer = TfidfVectorizer(
-        analyzer="word",
-        ngram_range=(1, 1),  # unigrams only to limit memory
-        max_features=10_000,
-    )
-    tfidf_matrix = vectorizer.fit_transform(texts)
-
-    # Process in small row batches to stay under 256MB memory.
-    # Each batch: compute dot product of a few rows against the full matrix,
-    # extract above-threshold pairs, then discard the batch result.
-
     if exact_sigs is None:
         exact_sigs = set()
 
-    n = tfidf_matrix.shape[0]
-    batch_size = 100  # small enough to avoid OOM on 256MB VM
-    adj: dict[int, list[tuple[int, float]]] = {}
+    # Precompute word sets and MinHash signatures
+    word_sets = [_word_set(c["question"]) for c in cards]
+    minhash_sigs = [_minhash(ws, num_hashes=32) for ws in word_sets]
 
-    tfidf_t = tfidf_matrix.T.tocsc()  # transpose once for efficient column slicing
+    # Use LSH banding: split 32 hashes into 8 bands of 4.
+    # Two items are candidates if they share at least one band.
+    # Tuned for high threshold (0.85) — fewer bands = fewer false candidates.
+    num_bands = 8
+    band_size = 4
+    candidates: set[tuple[int, int]] = set()
 
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        batch = tfidf_matrix[start:end]
+    for band_idx in range(num_bands):
+        band_start = band_idx * band_size
+        band_end = band_start + band_size
+        bucket: dict[tuple, list[int]] = {}
 
-        # Sparse dot product: (end-start) x n_features @ n_features x n → (end-start) x n
-        sim_batch = batch.dot(tfidf_t)
+        for i, sig in enumerate(minhash_sigs):
+            band_key = tuple(sig[band_start:band_end])
+            bucket.setdefault(band_key, []).append(i)
 
-        # Convert to COO to iterate only non-zero entries
-        coo = sim_batch.tocoo()
-        for local_i, j, v in zip(coo.row, coo.col, coo.data):
-            global_i = start + local_i
-            if global_i == j:
-                continue  # skip self
-            if v < threshold:
-                continue
-            if global_i < j:  # only store each pair once
-                adj.setdefault(global_i, []).append((j, float(v)))
+        for indices in bucket.values():
+            if len(indices) > 1:
+                for a_idx in range(len(indices)):
+                    for b_idx in range(a_idx + 1, len(indices)):
+                        candidates.add((indices[a_idx], indices[b_idx]))
 
-        del sim_batch, coo  # free memory immediately
-
-    # Build clusters from adjacency graph
-    clusters_map: dict[int, list[int]] = {}
+    # Verify candidates with exact Jaccard
+    clusters_map: dict[int, list[tuple[int, float]]] = {}
     assigned: set[int] = set()
 
-    for i in sorted(adj.keys()):
-        if i in assigned:
+    verified_pairs: list[tuple[int, int, float]] = []
+    for i, j in candidates:
+        sim = _jaccard(word_sets[i], word_sets[j])
+        if sim >= threshold:
+            verified_pairs.append((i, j, sim))
+
+    # Sort by first index for stable clustering
+    verified_pairs.sort()
+
+    for i, j, sim in verified_pairs:
+        if i in assigned or j in assigned:
             continue
-        neighbors = [(j, v) for j, v in adj[i] if j not in assigned]
-        if not neighbors:
+
+        # Check if already an exact dup
+        sig_i = f"{_normalize(cards[i]['question'])}|{_normalize(cards[i]['correct_answer'])}"
+        sig_j = f"{_normalize(cards[j]['question'])}|{_normalize(cards[j]['correct_answer'])}"
+        if sig_i == sig_j and sig_i in exact_sigs:
             continue
 
-        member_indices = [i] + [j for j, _ in neighbors]
+        # Start a cluster from this pair
+        cluster = [i, j]
+        assigned.add(i)
+        assigned.add(j)
 
-        # Check if this cluster is already fully covered by exact matching
-        sigs = {f"{_normalize(cards[m]['question'])}|{_normalize(cards[m]['correct_answer'])}" for m in member_indices}
-        if len(sigs) == 1 and next(iter(sigs)) in exact_sigs:
-            continue
+        # Check if any other candidates can join
+        for k in range(j + 1, len(cards)):
+            if k in assigned:
+                continue
+            if (i, k) in candidates or (j, k) in candidates:
+                s = _jaccard(word_sets[i], word_sets[k])
+                if s >= threshold:
+                    cluster.append(k)
+                    assigned.add(k)
 
-        avg_sim = float(np.mean([v for _, v in neighbors]))
-
-        for m in member_indices:
-            assigned.add(m)
-        clusters_map[i] = (member_indices, avg_sim)
+        clusters_map[i] = [(m, sim) for m in cluster]
 
     clusters = []
-    for rep_idx, (member_indices, avg_sim) in clusters_map.items():
+    for rep_idx, members in clusters_map.items():
+        member_indices = [m for m, _ in members]
+        avg_sim = sum(s for _, s in members) / len(members) if members else threshold
 
         clusters.append(DupCluster(
             card_ids=[cards[i]["id"] for i in member_indices],
             questions=[cards[i]["question"] for i in member_indices],
             correct_answers=[cards[i]["correct_answer"] for i in member_indices],
-            similarity=round(float(avg_sim), 3),
+            similarity=round(avg_sim, 3),
             match_type="near",
         ))
 
