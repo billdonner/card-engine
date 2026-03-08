@@ -636,7 +636,7 @@ async def update_session_properties(session_id: uuid.UUID, properties: dict) -> 
     return await p.fetchrow(
         "UPDATE sessions SET properties = properties || $2::jsonb "
         "WHERE id = $1 RETURNING id, properties",
-        session_id, properties,
+        session_id, json.dumps(properties),
     )
 
 
