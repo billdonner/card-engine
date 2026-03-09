@@ -230,7 +230,7 @@ async def main():
     async def init_conn(conn):
         await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
         await conn.set_type_codec("json",  encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
-        await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
+        await conn.execute(f"SET pg_trgm.similarity_threshold = {float(threshold):.6f}")
 
     kw = _db_kwargs()
     pool = await asyncpg.create_pool(

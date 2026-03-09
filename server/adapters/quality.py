@@ -101,7 +101,7 @@ async def _run_dedup_trgm(
 
             async with pool.acquire() as conn:
                 await conn.execute(
-                    f"SET pg_trgm.similarity_threshold = {threshold}"
+                    f"SET pg_trgm.similarity_threshold = {float(threshold):.6f}"
                 )
                 rows = await conn.fetch(lateral_sql, *params, timeout=300)
 

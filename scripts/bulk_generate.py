@@ -786,7 +786,7 @@ async def ensure_trgm_threshold(pool: asyncpg.Pool, threshold: float) -> None:
     try:
         # Use a single connection to set the threshold
         async with pool.acquire() as conn:
-            await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
+            await conn.execute(f"SET pg_trgm.similarity_threshold = {float(threshold):.6f}")
     except Exception:
         pass  # Extension may not be installed; fall back to Python check
 
