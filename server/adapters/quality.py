@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
@@ -18,6 +20,140 @@ router = APIRouter(prefix="/api/v1/quality", tags=["quality"])
 # ---------------------------------------------------------------------------
 # Dedup endpoints
 # ---------------------------------------------------------------------------
+
+@router.post("/dedup/trgm")
+async def dedup_trgm(
+    threshold: float = Query(0.65, ge=0.5, le=1.0, description="pg_trgm similarity threshold"),
+    category: str | None = Query(None, description="Limit to one category"),
+    delete: bool = Query(False, description="Delete duplicates (default: dry run)"),
+    concurrency: int = Query(16, ge=1, le=32, description="Worker concurrency"),
+):
+    """Fast server-side dedup using pg_trgm GIN index.
+
+    Runs entirely server-side (no proxy needed). Returns duplicate pairs found.
+    Uses O(log n) GIN index lookups — much faster than the Python O(n²) scan.
+    """
+    pool = get_pool()
+
+    # Verify extension + index exist
+    has_index = await pool.fetchval(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_cards_question_trgm'"
+    )
+    if not has_index:
+        return JSONResponse(status_code=503, content={
+            "error": "pg_trgm GIN index not found. Run schema/012_trgm_index.sql first."
+        })
+
+    async def init_conn_threshold(conn):
+        await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
+
+    # Load all trivia questions
+    t_start = time.monotonic()
+    if category:
+        rows = await pool.fetch(
+            "SELECT c.id::text, c.question, c.created_at, d.title AS category "
+            "FROM cards c JOIN decks d ON d.id = c.deck_id "
+            "WHERE d.kind = 'trivia' AND d.title = $1 ORDER BY c.created_at",
+            category,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT c.id::text, c.question, c.created_at, d.title AS category "
+            "FROM cards c JOIN decks d ON d.id = c.deck_id "
+            "WHERE d.kind = 'trivia' ORDER BY c.created_at",
+        )
+    questions = [dict(r) for r in rows]
+    total = len(questions)
+
+    # Worker-based scan
+    queue: asyncio.Queue = asyncio.Queue()
+    for q in questions:
+        await queue.put(q)
+
+    pairs: list[dict] = []
+    seen_ids: set[str] = set()
+    counters = {"checked": 0, "errors": 0}
+
+    async def worker(worker_id: int):
+        while True:
+            try:
+                q = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if q["id"] in seen_ids:
+                queue.task_done()
+                counters["checked"] += 1
+                continue
+
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
+                    matches = await conn.fetch(
+                        """
+                        SELECT id::text, question, similarity($1, question) AS sim
+                        FROM cards
+                        WHERE id::text <> $2
+                          AND created_at <= $3
+                          AND $1 % question
+                        ORDER BY sim DESC
+                        LIMIT 3
+                        """,
+                        q["question"], q["id"], q["created_at"],
+                        timeout=30,
+                    )
+            except Exception as exc:
+                logger.warning("dedup worker %d error: %s", worker_id, exc)
+                counters["errors"] += 1
+                queue.task_done()
+                counters["checked"] += 1
+                continue
+
+            if matches and q["id"] not in seen_ids:
+                best = dict(matches[0])
+                seen_ids.add(q["id"])
+                pairs.append({
+                    "newer_id": q["id"],
+                    "newer_q":  q["question"],
+                    "older_id": best["id"],
+                    "older_q":  best["question"],
+                    "sim":      float(best["sim"]),
+                    "category": q["category"],
+                })
+
+            counters["checked"] += 1
+            queue.task_done()
+
+    workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]
+    await asyncio.gather(*workers)
+
+    elapsed = time.monotonic() - t_start
+    deleted = 0
+
+    if delete and pairs:
+        to_delete = [p["newer_id"] for p in pairs]
+        for i in range(0, len(to_delete), 200):
+            batch = to_delete[i : i + 200]
+            result = await pool.execute(
+                "DELETE FROM cards WHERE id::text = ANY($1::text[])", batch
+            )
+            deleted += int(result.split()[-1])
+
+    cat_summary: dict[str, int] = {}
+    for p in pairs:
+        cat_summary[p["category"]] = cat_summary.get(p["category"], 0) + 1
+
+    return {
+        "total_questions": total,
+        "duplicates_found": len(pairs),
+        "deleted": deleted,
+        "dry_run": not delete,
+        "elapsed_seconds": round(elapsed, 1),
+        "errors": counters["errors"],
+        "by_category": cat_summary,
+        "pairs": pairs[:100],  # first 100 for inspection
+    }
+
 
 @router.post("/dedup/scan")
 async def dedup_scan(
