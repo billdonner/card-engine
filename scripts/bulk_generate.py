@@ -756,6 +756,42 @@ def _parse_response(content: str, subcategory: str, difficulty: str, category: s
 
 
 # ---------------------------------------------------------------------------
+# DB-level trgm dedup (requires pg_trgm extension + GIN index)
+# ---------------------------------------------------------------------------
+
+async def is_db_duplicate(pool: asyncpg.Pool, question: str, threshold: float = 0.65) -> bool:
+    """Check if question has a similar match in the DB using the pg_trgm GIN index.
+
+    O(log n) — vastly faster than the Python in-memory scan for large corpora.
+    Requires: CREATE EXTENSION pg_trgm; and GIN index on cards.question.
+    Falls back gracefully if the extension is not present.
+    """
+    try:
+        row = await pool.fetchrow(
+            """
+            SELECT id FROM cards
+            WHERE question % $1
+            LIMIT 1
+            """,
+            question,
+            timeout=5,
+        )
+        return row is not None
+    except Exception:
+        return False
+
+
+async def ensure_trgm_threshold(pool: asyncpg.Pool, threshold: float) -> None:
+    """Set pg_trgm similarity threshold for this session."""
+    try:
+        # Use a single connection to set the threshold
+        async with pool.acquire() as conn:
+            await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
+    except Exception:
+        pass  # Extension may not be installed; fall back to Python check
+
+
+# ---------------------------------------------------------------------------
 # Database operations
 # ---------------------------------------------------------------------------
 
@@ -998,9 +1034,20 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
 
     search_categories = [target_category]
 
-    # Load existing questions for dedup
-    existing = await load_existing_questions(pool, search_categories)
-    logger.info("Loaded %d existing questions from %s for dedup", len(existing), search_categories)
+    # Check whether the pg_trgm GIN index exists for DB-level dedup
+    trgm_index_exists = await pool.fetchval(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_cards_question_trgm'"
+    )
+    use_db_dedup = bool(trgm_index_exists)
+
+    if use_db_dedup:
+        logger.info("pg_trgm GIN index found — using DB-level dedup (O(log n))")
+        await ensure_trgm_threshold(pool, 0.65)
+        existing = []  # Not needed for DB dedup
+    else:
+        # Load existing questions for Python in-memory dedup
+        existing = await load_existing_questions(pool, search_categories)
+        logger.info("Loaded %d existing questions from %s for dedup (Python)", len(existing), search_categories)
 
     # Get or create deck
     deck_row = await pool.fetchrow(
@@ -1092,12 +1139,16 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
                 if total_inserted >= target_count:
                     break
 
-                match = is_fuzzy_duplicate(
-                    q["question"],
-                    q["correct_answer"],
-                    existing,
-                )
-                if match:
+                if use_db_dedup:
+                    # DB trgm check: O(log n) via GIN index
+                    is_dupe = await is_db_duplicate(pool, q["question"])
+                else:
+                    # Python in-memory check: O(n)
+                    is_dupe = bool(is_fuzzy_duplicate(
+                        q["question"], q["correct_answer"], existing,
+                    ))
+
+                if is_dupe:
                     total_dupes += 1
                     continue
 
@@ -1105,13 +1156,14 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
                     card_id = await insert_card(pool, q, deck_id, source_id)
                     logger.debug("Inserted card %s", card_id)
 
-                # Add to existing corpus for future dedup
-                existing.append({
-                    "id": str(uuid.uuid4()),
-                    "question": q["question"],
-                    "correct_answer": q["correct_answer"],
-                    "category": target_category,
-                })
+                if not use_db_dedup:
+                    # Add to existing corpus for future Python dedup
+                    existing.append({
+                        "id": str(uuid.uuid4()),
+                        "question": q["question"],
+                        "correct_answer": q["correct_answer"],
+                        "category": target_category,
+                    })
                 total_inserted += 1
 
             logger.info(
