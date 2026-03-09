@@ -27,6 +27,9 @@ _jobs: dict[str, dict] = {}  # job_id -> {status, result, started_at, ...}
 # Dedup endpoints
 # ---------------------------------------------------------------------------
 
+_BATCH = 3000  # cards processed per LATERAL query
+
+
 async def _run_dedup_trgm(
     job_id: str,
     threshold: float,
@@ -34,7 +37,11 @@ async def _run_dedup_trgm(
     delete: bool,
     concurrency: int,
 ) -> None:
-    """Background task: find duplicates using a single SQL LATERAL join (server-side, fast)."""
+    """Background task: batched LATERAL-join dedup using pg_trgm GIN index.
+
+    Processes cards in batches of _BATCH to avoid long-running connections.
+    Each batch: for each card, use GIN to find most similar older card O(log n).
+    """
     pool = get_pool()
     job = _jobs[job_id]
     job["status"] = "running"
@@ -42,29 +49,24 @@ async def _run_dedup_trgm(
     try:
         t_start = time.monotonic()
 
-        # Count total for progress tracking
-        if category:
-            total = await pool.fetchval(
-                "SELECT COUNT(*) FROM cards c JOIN decks d ON d.id = c.deck_id "
-                "WHERE d.kind = 'trivia' AND d.title = $1",
-                category,
-            )
-        else:
-            total = await pool.fetchval(
-                "SELECT COUNT(*) FROM cards c JOIN decks d ON d.id = c.deck_id "
-                "WHERE d.kind = 'trivia'"
-            )
+        # Fetch ordered card IDs + timestamps once
+        cat_where = "AND d.title = $1" if category else ""
+        id_params = [category] if category else []
+        id_rows = await pool.fetch(
+            f"SELECT c.id, c.created_at FROM cards c "
+            f"JOIN decks d ON d.id = c.deck_id AND d.kind = 'trivia' {cat_where} "
+            f"ORDER BY c.created_at",
+            *id_params,
+            timeout=60,
+        )
+        all_cards = list(id_rows)
+        total = len(all_cards)
         job["total"] = total
-        job["checked"] = "running SQL scan..."
 
-        # Single LATERAL join query — runs entirely server-side using GIN index.
-        # For each card, find the most similar *older* card. O(n log n) with GIN.
-        cat_filter = "AND d.title = $1" if category else ""
-        cat_filter_o = "AND od.title = $1" if category else ""
-        params = [threshold]
-        if category:
-            params.append(category)
+        pairs: list[dict] = []
+        seen_newer: set[str] = set()
 
+        cat_filter_o = "AND od.kind = 'trivia'" + (f" AND od.title = $3" if category else "")
         lateral_sql = f"""
             SELECT
                 c.id::text           AS newer_id,
@@ -74,49 +76,54 @@ async def _run_dedup_trgm(
                 match.sim            AS sim,
                 d.title              AS category
             FROM cards c
-            JOIN decks d ON d.id = c.deck_id AND d.kind = 'trivia' {cat_filter}
+            JOIN decks d ON d.id = c.deck_id AND d.kind = 'trivia'
             CROSS JOIN LATERAL (
                 SELECT o.id, o.question,
                        similarity(c.question, o.question) AS sim
                 FROM cards o
-                JOIN decks od ON od.id = o.deck_id AND od.kind = 'trivia' {cat_filter_o}
+                JOIN decks od ON od.id = o.deck_id {cat_filter_o}
                 WHERE o.id <> c.id
                   AND o.created_at <= c.created_at
                   AND c.question % o.question
                 ORDER BY similarity(c.question, o.question) DESC
                 LIMIT 1
             ) match
-            WHERE match.sim >= $1
+            WHERE c.id = ANY($2::uuid[])
+              AND match.sim >= $1
             ORDER BY match.sim DESC
         """
 
-        async with pool.acquire() as conn:
-            await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
-            rows = await conn.fetch(lateral_sql, *params, timeout=7200)
+        for offset in range(0, total, _BATCH):
+            batch_ids = [r["id"] for r in all_cards[offset : offset + _BATCH]]
+            params = [threshold, batch_ids]
+            if category:
+                params.append(category)
 
-        pairs = [
-            {
-                "newer_id": r["newer_id"],
-                "newer_q":  r["newer_q"],
-                "older_id": r["older_id"],
-                "older_q":  r["older_q"],
-                "sim":      float(r["sim"]),
-                "category": r["category"],
-            }
-            for r in rows
-        ]
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"SET pg_trgm.similarity_threshold = {threshold}"
+                )
+                rows = await conn.fetch(lateral_sql, *params, timeout=300)
 
-        # Deduplicate: keep only one entry per newer_id
-        seen: set[str] = set()
-        deduped: list[dict] = []
-        for p in pairs:
-            if p["newer_id"] not in seen:
-                seen.add(p["newer_id"])
-                deduped.append(p)
-        pairs = deduped
+            for r in rows:
+                nid = r["newer_id"]
+                if nid not in seen_newer:
+                    seen_newer.add(nid)
+                    pairs.append({
+                        "newer_id": nid,
+                        "newer_q":  r["newer_q"],
+                        "older_id": r["older_id"],
+                        "older_q":  r["older_q"],
+                        "sim":      float(r["sim"]),
+                        "category": r["category"],
+                    })
 
-        job["checked"] = total
-        job["found"] = len(pairs)
+            job["checked"] = min(offset + _BATCH, total)
+            job["found"] = len(pairs)
+            logger.info(
+                "dedup/trgm %s batch %d/%d: %d dupes so far",
+                job_id, offset + _BATCH, total, len(pairs),
+            )
 
         elapsed = time.monotonic() - t_start
         deleted = 0
