@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
@@ -35,7 +34,7 @@ async def _run_dedup_trgm(
     delete: bool,
     concurrency: int,
 ) -> None:
-    """Background task: scan trivia corpus for duplicates using pg_trgm GIN index."""
+    """Background task: find duplicates using a single SQL LATERAL join (server-side, fast)."""
     pool = get_pool()
     job = _jobs[job_id]
     job["status"] = "running"
@@ -43,86 +42,81 @@ async def _run_dedup_trgm(
     try:
         t_start = time.monotonic()
 
-        # Load questions
+        # Count total for progress tracking
         if category:
-            rows = await pool.fetch(
-                "SELECT c.id::text, c.question, c.created_at, d.title AS category "
-                "FROM cards c JOIN decks d ON d.id = c.deck_id "
-                "WHERE d.kind = 'trivia' AND d.title = $1 ORDER BY c.created_at",
+            total = await pool.fetchval(
+                "SELECT COUNT(*) FROM cards c JOIN decks d ON d.id = c.deck_id "
+                "WHERE d.kind = 'trivia' AND d.title = $1",
                 category,
             )
         else:
-            rows = await pool.fetch(
-                "SELECT c.id::text, c.question, c.created_at, d.title AS category "
-                "FROM cards c JOIN decks d ON d.id = c.deck_id "
-                "WHERE d.kind = 'trivia' ORDER BY c.created_at",
+            total = await pool.fetchval(
+                "SELECT COUNT(*) FROM cards c JOIN decks d ON d.id = c.deck_id "
+                "WHERE d.kind = 'trivia'"
             )
-        questions = [dict(r) for r in rows]
-        total = len(questions)
         job["total"] = total
+        job["checked"] = "running SQL scan..."
 
-        queue: asyncio.Queue = asyncio.Queue()
-        for q in questions:
-            await queue.put(q)
+        # Single LATERAL join query — runs entirely server-side using GIN index.
+        # For each card, find the most similar *older* card. O(n log n) with GIN.
+        cat_filter = "AND d.title = $1" if category else ""
+        cat_filter_o = "AND od.title = $1" if category else ""
+        params = [threshold]
+        if category:
+            params.append(category)
 
-        pairs: list[dict] = []
-        seen_ids: set[str] = set()
-        counters = {"checked": 0, "errors": 0}
+        lateral_sql = f"""
+            SELECT
+                c.id::text           AS newer_id,
+                c.question           AS newer_q,
+                match.id::text       AS older_id,
+                match.question       AS older_q,
+                match.sim            AS sim,
+                d.title              AS category
+            FROM cards c
+            JOIN decks d ON d.id = c.deck_id AND d.kind = 'trivia' {cat_filter}
+            CROSS JOIN LATERAL (
+                SELECT o.id, o.question,
+                       similarity(c.question, o.question) AS sim
+                FROM cards o
+                JOIN decks od ON od.id = o.deck_id AND od.kind = 'trivia' {cat_filter_o}
+                WHERE o.id <> c.id
+                  AND o.created_at <= c.created_at
+                  AND c.question % o.question
+                ORDER BY similarity(c.question, o.question) DESC
+                LIMIT 1
+            ) match
+            WHERE match.sim >= $1
+            ORDER BY match.sim DESC
+        """
 
-        async def worker(worker_id: int):
-            while True:
-                try:
-                    q = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+        async with pool.acquire() as conn:
+            await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
+            rows = await conn.fetch(lateral_sql, *params, timeout=7200)
 
-                if q["id"] in seen_ids:
-                    queue.task_done()
-                    counters["checked"] += 1
-                    continue
+        pairs = [
+            {
+                "newer_id": r["newer_id"],
+                "newer_q":  r["newer_q"],
+                "older_id": r["older_id"],
+                "older_q":  r["older_q"],
+                "sim":      float(r["sim"]),
+                "category": r["category"],
+            }
+            for r in rows
+        ]
 
-                try:
-                    async with pool.acquire() as conn:
-                        await conn.execute(f"SET pg_trgm.similarity_threshold = {threshold}")
-                        matches = await conn.fetch(
-                            """
-                            SELECT id::text, question, similarity($1, question) AS sim
-                            FROM cards
-                            WHERE id::text <> $2
-                              AND created_at <= $3
-                              AND $1 % question
-                            ORDER BY sim DESC
-                            LIMIT 3
-                            """,
-                            q["question"], q["id"], q["created_at"],
-                            timeout=30,
-                        )
-                except Exception as exc:
-                    logger.warning("dedup worker %d: %s", worker_id, exc)
-                    counters["errors"] += 1
-                    queue.task_done()
-                    counters["checked"] += 1
-                    continue
+        # Deduplicate: keep only one entry per newer_id
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for p in pairs:
+            if p["newer_id"] not in seen:
+                seen.add(p["newer_id"])
+                deduped.append(p)
+        pairs = deduped
 
-                if matches and q["id"] not in seen_ids:
-                    best = dict(matches[0])
-                    seen_ids.add(q["id"])
-                    pairs.append({
-                        "newer_id": q["id"],
-                        "newer_q":  q["question"],
-                        "older_id": best["id"],
-                        "older_q":  best["question"],
-                        "sim":      float(best["sim"]),
-                        "category": q["category"],
-                    })
-
-                counters["checked"] += 1
-                job["checked"] = counters["checked"]
-                job["found"] = len(pairs)
-                queue.task_done()
-
-        workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]
-        await asyncio.gather(*workers)
+        job["checked"] = total
+        job["found"] = len(pairs)
 
         elapsed = time.monotonic() - t_start
         deleted = 0
@@ -147,9 +141,8 @@ async def _run_dedup_trgm(
             "deleted": deleted,
             "dry_run": not delete,
             "elapsed_seconds": round(elapsed, 1),
-            "errors": counters["errors"],
             "by_category": cat_summary,
-            "pairs": pairs[:200],
+            "pairs": pairs[:500],
         })
         logger.info("dedup/trgm job %s done: %d dupes in %.1fs", job_id, len(pairs), elapsed)
 
@@ -196,7 +189,12 @@ async def dedup_trgm(
     background_tasks.add_task(
         _run_dedup_trgm, job_id, threshold, category, delete, concurrency
     )
-    return {"job_id": job_id, "status": "queued", "poll": f"/api/v1/quality/dedup/trgm/{job_id}"}
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "poll": f"/api/v1/quality/dedup/trgm/{job_id}",
+        "note": "SQL LATERAL join — runs server-side, poll for completion",
+    }
 
 
 @router.get("/dedup/trgm/{job_id}")
