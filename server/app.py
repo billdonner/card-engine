@@ -611,6 +611,26 @@ async def metrics():
             "SELECT COUNT(*) FROM cards WHERE created_at > now() - interval '5 minutes'"
         )
         rate_per_min = round(added_5m / 5.0, 1)
+
+        # Per-minute history for sparkline (last 20 minutes, oldest→newest)
+        inject_history_rows = await p.fetch(
+            """
+            SELECT date_trunc('minute', created_at) AS minute, COUNT(*) AS cnt
+            FROM cards
+            WHERE created_at > now() - interval '20 minutes'
+            GROUP BY minute
+            ORDER BY minute
+            """
+        )
+        # Fill all 20 buckets so sparkline always has context (0 for quiet minutes)
+        from datetime import datetime, timezone, timedelta
+        now_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        bucket_map = {r["minute"].replace(tzinfo=timezone.utc): int(r["cnt"]) for r in inject_history_rows}
+        inject_history = [
+            bucket_map.get(now_utc - timedelta(minutes=i), 0)
+            for i in range(19, -1, -1)
+        ]
+
         result.extend([
             {
                 "key": "inject_rate",
@@ -618,6 +638,7 @@ async def metrics():
                 "value": rate_per_min,
                 "unit": "cards/min",
                 "warn_above": 0.1,  # yellow when actively injecting
+                "sparkline_history": inject_history,
             },
             {
                 "key": "inject_last_1m",
