@@ -602,6 +602,37 @@ async def metrics():
                 "warn_below": 4900,
             })
 
+        # -- Injection rate (shows live bulk_generate activity) ----------------
+
+        added_1m = await p.fetchval(
+            "SELECT COUNT(*) FROM cards WHERE created_at > now() - interval '1 minute'"
+        )
+        added_5m = await p.fetchval(
+            "SELECT COUNT(*) FROM cards WHERE created_at > now() - interval '5 minutes'"
+        )
+        rate_per_min = round(added_5m / 5.0, 1)
+        result.extend([
+            {
+                "key": "inject_rate",
+                "label": "Inject rate",
+                "value": rate_per_min,
+                "unit": "cards/min",
+                "warn_above": 0.1,  # yellow when actively injecting
+            },
+            {
+                "key": "inject_last_1m",
+                "label": "Added last 1 min",
+                "value": added_1m,
+                "unit": "cards",
+            },
+            {
+                "key": "inject_last_5m",
+                "label": "Added last 5 min",
+                "value": added_5m,
+                "unit": "cards",
+            },
+        ])
+
         # -- Question reports -------------------------------------------------
 
         report_count = await get_report_count()

@@ -767,15 +767,18 @@ async def is_db_duplicate(pool: asyncpg.Pool, question: str, threshold: float = 
     Falls back gracefully if the extension is not present.
     """
     try:
-        row = await pool.fetchrow(
-            """
-            SELECT id FROM cards
-            WHERE question % $1
-            LIMIT 1
-            """,
-            question,
-            timeout=5,
-        )
+        async with pool.acquire(timeout=10) as conn:
+            # SET threshold on this connection — it's session-local and pool
+            # connections don't inherit it from ensure_trgm_threshold()
+            await conn.execute(
+                f"SET pg_trgm.similarity_threshold = {float(threshold):.6f}",
+                timeout=5,
+            )
+            row = await conn.fetchrow(
+                "SELECT id FROM cards WHERE question % $1 LIMIT 1",
+                question,
+                timeout=5,
+            )
         return row is not None
     except Exception:
         return False
@@ -1167,9 +1170,22 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
                 total_inserted += 1
 
             logger.info(
-                "Progress: %d/%d inserted (%d generated, %d dupes skipped)",
-                total_inserted, target_count, total_generated, total_dupes,
+                "Progress: %d/%d inserted (%d generated, %d dupes skipped, %d rejected)",
+                total_inserted, target_count, total_generated, total_dupes, total_rejected,
             )
+
+            # Stop if rejection rate (dupes + veracity rejections) hits 50% —
+            # indicates the AI is exhausting unique content for this category
+            total_rejections = total_dupes + total_rejected
+            if total_generated >= 50 and total_rejections / total_generated >= 0.50:
+                logger.warning(
+                    "STOPPING: rejection rate %.0f%% >= 50%% after %d generated — "
+                    "AI likely exhausted unique content for '%s'",
+                    100 * total_rejections / total_generated,
+                    total_generated,
+                    target_category,
+                )
+                break
 
             # Small delay between batches to avoid rate limiting
             if total_inserted < target_count:

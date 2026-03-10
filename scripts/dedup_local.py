@@ -195,18 +195,23 @@ async def main():
         for cat, cnt in sorted(cat_summary.items(), key=lambda x: -x[1]):
             print(f"  {cnt:>5}  {cat}", file=sys.stderr)
 
-        # Delete if requested
+        # Delete if requested — open a fresh connection since the scan takes
+        # many minutes and the original connection may have been dropped by the proxy
         deleted = 0
         if args.delete and pairs:
             to_delete = [p["newer_id"] for p in pairs]
             print(f"\nDeleting {len(to_delete)} duplicates...", file=sys.stderr)
-            for i in range(0, len(to_delete), 200):
-                batch = to_delete[i : i + 200]
-                result = await conn.execute(
-                    "DELETE FROM cards WHERE id::text = ANY($1::text[])", batch
-                )
-                deleted += int(result.split()[-1])
-                print(f"  Deleted batch {i//200 + 1}: {result}", file=sys.stderr)
+            del_conn = await asyncpg.connect(host=host, port=port, user=user, password=password, database=dbname)
+            try:
+                for i in range(0, len(to_delete), 200):
+                    batch = to_delete[i : i + 200]
+                    result = await del_conn.execute(
+                        "DELETE FROM cards WHERE id::text = ANY($1::text[])", batch
+                    )
+                    deleted += int(result.split()[-1])
+                    print(f"  Deleted batch {i//200 + 1}: {result}", file=sys.stderr)
+            finally:
+                await del_conn.close()
             print(f"  Total deleted: {deleted}", file=sys.stderr)
         elif pairs:
             print(f"\nDRY RUN — add --delete to remove {len(pairs)} duplicates", file=sys.stderr)
