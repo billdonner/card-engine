@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 
 import asyncpg
 
@@ -114,7 +115,7 @@ async def get_deck(deck_id: str) -> tuple[asyncpg.Record | None, list[asyncpg.Re
     """Get a single deck and its cards. Returns (deck_row, card_rows)."""
     p = get_pool()
     deck = await p.fetchrow(
-        "SELECT id, title, kind, properties, card_count, created_at "
+        "SELECT id, title, kind, properties, card_count, created_at, updated_at "
         "FROM decks WHERE id = $1",
         deck_id,
     )
@@ -131,17 +132,18 @@ async def get_deck(deck_id: str) -> tuple[asyncpg.Record | None, list[asyncpg.Re
 
 async def get_all_decks_with_cards(
     kind: str, tier: str | None = None, categories: list[str] | None = None,
-    exclude_quarantined: bool = False,
+    exclude_quarantined: bool = False, since: datetime | None = None,
 ) -> list[asyncpg.Record]:
     """Bulk-fetch all decks of a given kind with their cards via LEFT JOIN.
 
     Returns rows with both deck and card columns; caller groups by deck.
+    When `since` is provided, only cards created after that timestamp are returned.
     """
     p = get_pool()
     quarantine_filter = "AND c.quarantined = FALSE " if exclude_quarantined else ""
     sql = (
         "SELECT d.id AS deck_id, d.title, d.kind, d.properties AS deck_props, "
-        "       d.card_count, d.created_at AS deck_created, "
+        "       d.card_count, d.created_at AS deck_created, d.updated_at AS deck_updated, "
         "       c.id AS card_id, c.position, c.question, "
         "       c.properties AS card_props, c.difficulty, "
         "       c.source_url, c.source_date "
@@ -160,15 +162,19 @@ async def get_all_decks_with_cards(
         sql += f"  AND d.title = ANY(${idx}::text[]) "
         params.append(categories)
         idx += 1
+    if since:
+        sql += f"  AND (c.created_at IS NULL OR c.created_at > ${idx}::timestamptz) "
+        params.append(since)
+        idx += 1
     sql += "ORDER BY d.created_at DESC, c.position"
     return await p.fetch(sql, *params)
 
 
 async def get_categories_with_counts(tier: str | None = None) -> list[asyncpg.Record]:
-    """Get trivia categories (deck titles) with card counts and pic."""
+    """Get trivia categories (deck titles) with card counts, pic, and updated_at."""
     p = get_pool()
     sql = (
-        "SELECT title, properties->>'pic' AS pic, card_count "
+        "SELECT title, properties->>'pic' AS pic, card_count, updated_at "
         "FROM decks WHERE kind = 'trivia' "
         "  AND COALESCE(properties->>'status', 'published') = 'published' "
     )

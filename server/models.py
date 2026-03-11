@@ -57,6 +57,7 @@ class FlashcardDeckOut(BaseModel):
     voice: str | None = None
     card_count: int
     created_at: datetime
+    updated_at: datetime
     cards: list[FlashcardCardOut]
 
 
@@ -93,6 +94,7 @@ class CategoryOut(BaseModel):
     name: str
     pic: str
     count: int
+    updated_at: datetime
 
 
 class CategoriesOut(BaseModel):

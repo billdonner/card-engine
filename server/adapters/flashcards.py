@@ -22,6 +22,7 @@ def _build_deck(deck_info: dict, cards: list[dict]) -> FlashcardDeckOut:
         voice=deck_info["properties"].get("voice"),
         card_count=deck_info["card_count"],
         created_at=deck_info["created_at"],
+        updated_at=deck_info["updated_at"],
         cards=[
             FlashcardCardOut(
                 position=c["position"],
@@ -51,6 +52,7 @@ async def list_flashcard_decks():
                 "properties": r["deck_props"],
                 "card_count": r["card_count"],
                 "created_at": r["deck_created"],
+                "updated_at": r["deck_updated"],
             }
         if r["card_id"] is not None:
             cards_map[did].append({
@@ -81,6 +83,7 @@ async def get_flashcard_deck(deck_id: UUID):
         "properties": row["properties"],
         "card_count": row["card_count"],
         "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
     cards = [
         {"position": c["position"], "question": c["question"], "properties": c["properties"]}

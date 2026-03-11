@@ -72,6 +72,7 @@ async def get_gamedata(
     player_id: UUID | None = Query(None, description="Player UUID — enables seen-card exclusion and session creation"),
     count: int | None = Query(None, ge=1, le=500, description="Random sample of N questions"),
     app_id: str = Query("qross", description="App identifier for history tracking"),
+    since: datetime | None = Query(None, description="Return only cards created after this ISO 8601 timestamp"),
 ):
     """Bulk export trivia content in alities Challenge format.
 
@@ -79,7 +80,7 @@ async def get_gamedata(
     a session is auto-created, and the response includes session metadata.
     """
     cat_list = [c.strip() for c in categories.split(",") if c.strip()] if categories else None
-    rows = await get_all_decks_with_cards("trivia", tier=tier, categories=cat_list, exclude_quarantined=True)
+    rows = await get_all_decks_with_cards("trivia", tier=tier, categories=cat_list, exclude_quarantined=True, since=since)
 
     challenges = _build_challenges(rows)
     total_available = len(challenges)
@@ -131,13 +132,14 @@ async def get_gamedata(
 
 @router.get("/categories", response_model=CategoriesOut)
 async def get_categories(tier: str | None = Query(None, description="Filter by deck tier: free, family, premium")):
-    """List trivia categories with counts and SF Symbol pics."""
+    """List trivia categories with counts, SF Symbol pics, and updated_at for cache freshness."""
     rows = await get_categories_with_counts(tier=tier)
     categories = [
         CategoryOut(
             name=r["title"],
             pic=r["pic"] or "questionmark.circle",
             count=r["card_count"],
+            updated_at=r["updated_at"],
         )
         for r in rows
     ]
