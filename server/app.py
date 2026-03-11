@@ -578,28 +578,22 @@ async def metrics():
             })
 
         # -- Per-category question counts (bulk generation progress) ----------
-        TARGET_CATEGORIES = [
-            "General Knowledge", "History", "Politics", "Pop Culture",
-            "Literature", "Geography", "Music", "Mythology", "Mathematics",
-            "Science & Nature", "Sports",
-        ]
         cat_rows = await p.fetch(
             "SELECT d.title, COUNT(c.id) as n FROM decks d "
             "JOIN cards c ON c.deck_id = d.id "
-            "WHERE d.kind = 'trivia' AND d.title = ANY($1::text[]) "
-            "GROUP BY d.title",
-            TARGET_CATEGORIES,
+            "WHERE d.kind = 'trivia' "
+            "GROUP BY d.title ORDER BY n DESC",
         )
-        cat_counts = {r["title"]: int(r["n"]) for r in cat_rows}
-        for cat in TARGET_CATEGORIES:
-            count = cat_counts.get(cat, 0)
+        for r in cat_rows:
+            cat = r["title"]
+            count = int(r["n"])
             key = "cat_" + cat.lower().replace(" ", "_").replace("&", "and")
             result.append({
                 "key": key,
                 "label": cat,
                 "value": count,
                 "unit": "questions",
-                "warn_below": 4900,
+                "warn_below": 500,
             })
 
         # -- Injection rate (shows live bulk_generate activity) ----------------
