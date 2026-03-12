@@ -41,27 +41,23 @@ cd ~/card-engine
 python scripts/bulk_generate.py --category "Arts & Literature" --count 1000
 ```
 
-For multiple categories, use a **rolling 2-slot worker pool** — start the next job as soon as any slot frees, don't wait for pairs:
+For multiple categories, run **one at a time** (sequential). Fly Postgres enters recovery mode after each ~500-question bulk run, so parallel/pooled approaches cause cascading connection failures:
 
 ```bash
 #!/bin/bash
-CATEGORIES=("Science & Nature" "History" "Geography" "Technology" "Mathematics")
-pids=()
+CATEGORIES=("Science & Nature" "History" "Geography")
 
 for cat in "${CATEGORIES[@]}"; do
-    while [ ${#pids[@]} -ge 2 ]; do
-        wait -n -p done_pid "${pids[@]}" 2>/dev/null
-        pids=("${pids[@]/$done_pid}")
-        pids=(${pids[@]})  # repack
-    done
     echo "Starting: $cat"
-    python scripts/bulk_generate.py --category "$cat" --count 1000 \
-        > "/tmp/prod_$(echo $cat | tr ' &' '_')_generate.log" 2>&1 &
-    pids+=($!)
+    .venv/bin/python scripts/bulk_generate.py --category "$cat" --count 500 \
+        --no-verify --concurrent 2 \
+        > "/tmp/gen_$(echo $cat | tr ' &-' '___').log" 2>&1
+    echo "Done: $cat"
 done
-wait
 echo "All done"
 ```
+
+**Important:** After each category completes, the Fly Postgres instance may enter WAL recovery for 2-5 minutes. Sequential execution handles this naturally — the next category's connection attempt waits and retries. If a category fails to connect, just re-run it after a few minutes.
 
 ### 4. Post-generation quality checks
 
@@ -88,8 +84,9 @@ trivia-check stats
 
 The server-monitor dashboard at https://bd-server-monitor.fly.dev shows live `cat_*` metrics from cardzerver — question counts per category update in real time during generation.
 
-## The 20 Canonical Categories
+## The 36 Canonical Categories
 
+### Original 20
 ```
 Science & Nature    Technology      Mathematics     History
 Geography           Politics        Sports          Music
@@ -98,7 +95,17 @@ Board Games         Comics          Food & Drink    Pop Culture
 Mythology           Society & Culture  General Knowledge  Vehicles
 ```
 
-Category names must match exactly (case-sensitive). The server normalizes ~40 aliases (e.g., "science" → "Science & Nature") but bulk_generate.py uses exact names.
+### Specialty 16 (added March 2026)
+```
+Romance Novels      Silent Movies       Broadway Musicals   Cocktails & Spirits
+Space Exploration   True Crime          Fashion & Design    Roller Coasters
+National Parks      Horror Movies       The Beatles         Reality TV
+Volcanoes & Earthquakes  Pirates & Smugglers  Olympic Games  Candy & Chocolate
+```
+
+**Not yet generated (need bulk_generate):** Stand-Up Comedy, Chess, Animated Films, Inventions
+
+Category names must match exactly (case-sensitive). The server normalizes ~80 aliases (e.g., "science" → "Science & Nature", "beatles" → "The Beatles") but bulk_generate.py uses exact names.
 
 ## Daemon Control (for steady-state growth)
 
@@ -144,6 +151,9 @@ obo-gen writes to cardzerver via REST API (no direct DB access). Set `CARDZERVER
 
 - **Never use `CE_DATABASE_URL` with Fly proxy** — passwords containing `#` break URL parsing. Use individual `CE_DATABASE_*` vars.
 - **Fly proxy dies silently** — if bulk_generate hangs on DB connection, restart the proxy.
+- **Fly Postgres enters recovery mode after bulk writes** — after ~500 questions, Postgres checkpoints and rejects connections for 2-5 min. Run categories sequentially and expect some to fail. Re-run failed categories after the DB recovers.
+- **Use `.venv/bin/python` not `python`** — macOS doesn't have a system `python`. Always use the card-engine venv directly.
+- **Use `--concurrent 2`** — higher concurrency overwhelms the Fly proxy. Two workers is the sweet spot.
 - **Dedup thresholds**: Jaccard word similarity at 0.85, trigram at 0.65. These are tuned to catch paraphrasing without false positives. Don't lower them.
 - **Deck creation is automatic** — `bulk_generate.py` creates the deck if it doesn't exist. No manual setup needed.
 - **Card count is trigger-maintained** — `trg_card_count` on the `cards` table keeps `decks.card_count` accurate. Never update it manually.
