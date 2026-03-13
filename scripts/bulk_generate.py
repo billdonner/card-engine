@@ -30,11 +30,57 @@ import uuid
 from collections import Counter
 from datetime import datetime, timezone
 
+import atexit
+import signal
+import time
+
 import asyncpg
 import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("bulk_generate")
+
+# --- Module-level status tracking for crash-safe reporting (Fix #2) ---
+_status = {
+    "category": "",
+    "target": 0,
+    "generated": 0,
+    "inserted": 0,
+    "dupes": 0,
+    "rejected": 0,
+    "batches": 0,
+    "status": "starting",
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+}
+
+
+def _write_status_file():
+    """Write current generation status to JSON file. Called on normal exit and crashes."""
+    if not _status["category"]:
+        return  # nothing to report (e.g. --dedup-only mode)
+    _status["finished_at"] = datetime.now(timezone.utc).isoformat()
+    safe_name = re.sub(r"[^a-zA-Z0-9]", "_", _status["category"])
+    path = f"/tmp/bulk_status_{safe_name}.json"
+    try:
+        with open(path, "w") as f:
+            json.dump(_status, f, indent=2)
+        logger.info("Status written to %s", path)
+    except Exception as e:
+        logger.error("Failed to write status file: %s", e)
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGTERM/SIGINT gracefully — write status then exit."""
+    _status["status"] = f"killed (signal {signum})"
+    _write_status_file()
+    sys.exit(128 + signum)
+
+
+atexit.register(_write_status_file)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 # ---------------------------------------------------------------------------
 # Fuzzy dedup utilities
@@ -1500,27 +1546,48 @@ async def main():
         await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
         await conn.set_type_codec("json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
-    # Support explicit keyword params to avoid URL-parsing issues with special chars in passwords
-    db_host = os.environ.get("CE_DATABASE_HOST", "")
-    if db_host:
-        # ssl=False for local Fly proxy; direct connections can override via CE_DATABASE_SSL
-        use_ssl = os.environ.get("CE_DATABASE_SSL", "false").lower() in ("true", "1", "yes")
-        pool = await asyncpg.create_pool(
-            host=db_host,
-            port=int(os.environ.get("CE_DATABASE_PORT", "5432")),
-            user=os.environ.get("CE_DATABASE_USER", ""),
-            password=os.environ.get("CE_DATABASE_PASSWORD", ""),
-            database=os.environ.get("CE_DATABASE_NAME", "card_engine"),
-            ssl="require" if use_ssl else False,
-            init=_init_conn,
-        )
-        logger.info("Connected via CE_DATABASE_HOST=%s:%s", db_host, os.environ.get("CE_DATABASE_PORT", "5432"))
-    else:
-        db_url = os.environ.get("CE_DATABASE_URL", os.environ.get("DATABASE_URL", ""))
-        if not db_url:
-            db_url = "postgresql://billdonner@localhost:5432/card_engine"
-            logger.info("No DATABASE_URL set, using default: %s", db_url)
-        pool = await asyncpg.create_pool(db_url, init=_init_conn)
+    async def _connect_with_retry(max_retries: int = 10, base_delay: float = 15.0) -> asyncpg.Pool:
+        """Connect to DB with exponential backoff for Fly Postgres recovery mode."""
+        db_host = os.environ.get("CE_DATABASE_HOST", "")
+        for attempt in range(1, max_retries + 1):
+            try:
+                if db_host:
+                    use_ssl = os.environ.get("CE_DATABASE_SSL", "false").lower() in ("true", "1", "yes")
+                    pool = await asyncpg.create_pool(
+                        host=db_host,
+                        port=int(os.environ.get("CE_DATABASE_PORT", "5432")),
+                        user=os.environ.get("CE_DATABASE_USER", ""),
+                        password=os.environ.get("CE_DATABASE_PASSWORD", ""),
+                        database=os.environ.get("CE_DATABASE_NAME", "card_engine"),
+                        ssl="require" if use_ssl else False,
+                        init=_init_conn,
+                    )
+                    logger.info("Connected via CE_DATABASE_HOST=%s:%s", db_host, os.environ.get("CE_DATABASE_PORT", "5432"))
+                else:
+                    db_url = os.environ.get("CE_DATABASE_URL", os.environ.get("DATABASE_URL", ""))
+                    if not db_url:
+                        db_url = "postgresql://billdonner@localhost:5432/card_engine"
+                        logger.info("No DATABASE_URL set, using default: %s", db_url)
+                    pool = await asyncpg.create_pool(db_url, init=_init_conn)
+                return pool
+            except (
+                asyncpg.exceptions.CannotConnectNowError,
+                asyncpg.exceptions.ConnectionDoesNotExistError,
+                OSError,
+                TimeoutError,
+            ) as e:
+                delay = min(base_delay * (2 ** (attempt - 1)), 120)
+                if attempt < max_retries:
+                    logger.warning(
+                        "DB connection failed (attempt %d/%d): %s — retrying in %.0fs",
+                        attempt, max_retries, e, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("DB connection failed after %d attempts, giving up", max_retries)
+                    raise
+
+    pool = await _connect_with_retry()
 
     if args.dedup_only:
         await run_dedup_scan(pool, args.delete_dupes)
@@ -1581,6 +1648,12 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
 
     target_category = args.category
     target_count = args.count
+
+    # Initialize status tracking for crash-safe reporting
+    _status["category"] = target_category
+    _status["target"] = target_count
+    _status["status"] = "running"
+    _status["started_at"] = datetime.now(timezone.utc).isoformat()
 
     search_categories = [target_category]
 
@@ -1675,11 +1748,14 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
                 batch_questions.extend(result)
 
             total_generated += len(batch_questions)
+            _status["generated"] = total_generated
+            _status["batches"] = batch_num
 
             # Verification pass — drop factually incorrect/uncertain questions
             if not skip_verify and batch_questions:
                 batch_questions, rejected = await verify_batch(api_key, batch_questions, client)
                 total_rejected += rejected
+                _status["rejected"] = total_rejected
                 if rejected:
                     logger.info("Verification: rejected %d/%d questions in this batch",
                                 rejected, rejected + len(batch_questions))
@@ -1700,6 +1776,7 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
 
                 if is_dupe:
                     total_dupes += 1
+                    _status["dupes"] = total_dupes
                     continue
 
                 if not args.dry_run:
@@ -1715,6 +1792,7 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
                         "category": target_category,
                     })
                 total_inserted += 1
+                _status["inserted"] = total_inserted
 
             logger.info(
                 "Progress: %d/%d inserted (%d generated, %d dupes skipped, %d rejected)",
@@ -1732,6 +1810,7 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
                     total_generated,
                     target_category,
                 )
+                _status["status"] = "stopped_high_rejection"
                 break
 
             # Small delay between batches to avoid rate limiting
@@ -1751,6 +1830,9 @@ async def run_generation(pool: asyncpg.Pool, api_key: str, args):
     if getattr(args, "no_verify", False):
         print(f"  (VERIFICATION SKIPPED)")
     print(f"{'='*80}")
+
+    # Mark status as completed for the JSON status file
+    _status["status"] = "completed"
 
 
 if __name__ == "__main__":
